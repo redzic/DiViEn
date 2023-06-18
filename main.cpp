@@ -15,12 +15,48 @@
 
 extern "C" {
 #include <libavcodec/avcodec.h>
+#include <libavcodec/codec.h>
 #include <libavformat/avformat.h>
+#include <libavutil/avutil.h>
 }
 
 int main() {
   // struct that holds some data about the container (format)
-  auto x = avformat_alloc_context();
+  // does this have to be freed manually?
+  auto fctx = avformat_alloc_context();
 
-  std::cout << "hey there!\n";
+  if (avformat_open_input(&fctx, "/Users/yusufredzic/Downloads/river.mp4",
+                          nullptr, nullptr)) {
+    // nonzero return value means FAILURE
+    std::cout << "avformat_open_input() returned failure, aborting...\n";
+    return -1;
+  }
+
+  // so much bloat :(
+  std::cout << "Format " << fctx->iformat->long_name << ", duration "
+            << fctx->duration << " us\n";
+
+  // this populates some fields in the context
+  // possibly not necessary for all formats
+  avformat_find_stream_info(fctx, nullptr);
+
+  std::cout << "number of streams: " << fctx->nb_streams << "\n";
+
+  for (size_t i = 0; i < fctx->nb_streams; i++) {
+    // codec parameters for current stream
+    auto curr_codecpar = fctx->streams[i]->codecpar;
+    auto curr_codec = avcodec_find_decoder(curr_codecpar->codec_id);
+
+    // ok I give up, I will just use fmt even if it's not 100% perfect
+
+    if (curr_codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+      std::cout << "Video codec: resolution " << curr_codecpar->width << " x "
+                << curr_codecpar->height << "px\n";
+    } else if (curr_codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
+      std::cout << "Audio codec: " << curr_codecpar->ch_layout.nb_channels
+                << ", sample rate " << curr_codecpar->sample_rate << "hz\n";
+    }
+  }
+
+  avformat_free_context(fctx);
 }
