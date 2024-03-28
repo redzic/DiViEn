@@ -79,6 +79,12 @@ void segvHandler(int /*unused*/) {
     exit(EXIT_FAILURE); // NOLINT
 }
 
+// Idea:
+// we could send the same chunk
+// to different nodes if one is not doing it fast enough.
+// To do this we could have some features in our vec of
+//
+
 template <class> inline constexpr bool always_false_v = false;
 
 auto dist_ms(auto start, auto end) {
@@ -189,8 +195,9 @@ int encode_frames(const char* file_name, std::span<AVFrame*> frame_buffer,
     DvAssert(!frame_buffer.empty());
 
     // TODO is it possible to reuse encoder instances?
-    const auto* codec = avcodec_find_encoder_by_name("libx264");
-    // const auto* codec = avcodec_find_encoder_by_name("libaom-av1");
+    // const auto* codec = avcodec_find_encoder_by_name("libx264");
+    // const auto* codec = avcodec_find_encoder_by_name("libx265");
+    const auto* codec = avcodec_find_encoder_by_name("libaom-av1");
     // so avcodeccontext is used for both encoding and decoding...
     // TODO make this its own class
     auto* avcc = avcodec_alloc_context3(codec);
@@ -211,14 +218,14 @@ int encode_frames(const char* file_name, std::span<AVFrame*> frame_buffer,
     avcc->pix_fmt =
         av_pix_fmt_supported_version((AVPixelFormat)frame_buffer[0]->format);
 
-    // X264:
-    av_opt_set(avcc->priv_data, "crf", "25", 0);
-    av_opt_set(avcc->priv_data, "preset", "veryfast", 0);
+    // X264/5:
+    // av_opt_set(avcc->priv_data, "crf", "25", 0);
+    // av_opt_set(avcc->priv_data, "preset", "veryfast", 0);
     // AOM:
-    // av_opt_set(avcc->priv_data, "cpu-used", "6", 0);
-    // av_opt_set(avcc->priv_data, "end-usage", "q", 0);
+    av_opt_set(avcc->priv_data, "cpu-used", "6", 0);
+    av_opt_set(avcc->priv_data, "end-usage", "q", 0);
     // av_opt_set(avcc->priv_data, "enable-qm", "1", 0);
-    // av_opt_set(avcc->priv_data, "cq-level", "18", 0);
+    av_opt_set(avcc->priv_data, "cq-level", "30", 0);
 
     // RAV1E:
     // av_opt_set(avcc->priv_data, "speed", "7", 0);
@@ -832,22 +839,54 @@ void run_client() {
     }
 }
 
+// the problem with using the same buffer and holding the decoder
+// is that you prevent other worker threads from using the decoder.
+
+// Unfortunately there's really not much you can do about that.
+// Because you would just have to store a huge number of frames.
+
+// there's a memory leak with x265_malloc but what can I do about that...
+
+// tests vs av1an
+//  ./target/release/av1an -i ~/avdist/OUTPUT28_29.mp4 --passes 1 --split-method
+//  none --concat mkvmerge --verbose --workers 4 -o ni.mkv -x 60 -m lsmash
+//  --pix-format yuv420p
+
+// 21.23 s (divien) vs 29.16 s (av1an).
+
+// 40.38 s (divien) vs 60.02 s (av1an)
+
+// ok so ffmpeg does actually store a refcount, but only for the
+// buffers themselves.
+//  buf->buffer->refcount
+
+// ok so ...
+// av_frame_unref seems to free the object that holds the reference itself,
+// but not the UNDERLYING buffers (I think).
+
+// yeah ok so it really does do the refcount thing as expected.
+// The underlying buffer will still live somewhere else, and it's up
+// to the encoder to call unref(), I believe.
+// But we still have to call unref too. I'm PRETTY SURE anyway.
+// We should double check that the frames we receive from the
+// decoder are in fact ref counted.
+
+// but now we have to look into this buffer_replace() (libavutil/buffer.c)
+// function.
+
+// I'm pretty sure buffer_replace basically frees the thing if the refcount
+// is 1. (OR 0). I want to double check tho.
+
+// TODO perhaps for debug/info purposes we can compute the "overhead"
+// of decoding unused frames? This would be for decoding segmented stuff.
+
 int main(int argc, char* argv[]) {
-    if (argc != 2) {
-        printf("Must specify 2 args.\n");
+    if (argc < 2) {
+        printf("Must specify at least 2 args.\n");
         return -1;
     }
 
     av_log_set_callback(avlog_do_nothing);
-
-    const char* from_file = "/home/yusuf/avdist/test_x265.mp4";
-    // const char* from_file = "/home/yusuf/avdist/OUTPUT0.mp4";
-
-    // auto vdec = DecodeContext::open("OUTPUT_2_3.mp4");
-
-    // main_encode_loop("bruh.mp4", std::get<DecodeContext>(vdec));
-
-    // return 0;
 
     // ok now we have our actual TCP server/client setup here.
     // next step AFTER this is to setup async
@@ -858,10 +897,23 @@ int main(int argc, char* argv[]) {
     try {
 
         if (mode == "server") {
+            const char* from_file = "/home/yusuf/avdist/OUTPUT28_29.mp4";
+
             // Now the TODO is to keep track of
             run_server(from_file);
         } else if (mode == "client") {
             run_client();
+        } else if (mode == "standalone") {
+            if (argc < 3) {
+                printf(
+                    "Insufficient arguments specified for standalone mode.\n");
+                return -1;
+            }
+
+            auto vdec = DecodeContext::open(argv[2]);
+
+            main_encode_loop("standalone_output.mp4",
+                             std::get<DecodeContext>(vdec));
         } else {
             printf("unknown mode '%.*s'.\n", (int)mode.size(), mode.data());
         }
@@ -871,8 +923,29 @@ int main(int argc, char* argv[]) {
     }
     return 0;
 }
-// TODO I'm pretty sure the progress bar is totally wrong.
-// It's counting frames sent instead of packets received.
+
+// bruh what's a solution...
+// For this
+
+// I mean for distributed we will know the packet count ahead of time.
+// so that could help or whatever. Plus we will know the offsets.
+// Hmm...
+// This is a complicated problem.
+// Actuallly for chunked we will HAVE to run multiple decoders anyway,
+// we have no choice.
+//      - when we do get to this, an optimization would be to separate
+//        the muxer and the decoder so we don't have to allocate another
+//        decoder to decode packets from the next stream.
+
+// I mean, for the purposes of distributed we can ignore the problem for now.
+// But one idea could be like... to have a buffer full of frames that keeps
+// decoding totally independently of workers, just fills up a buffer of free
+// frames. And then the workers get assigned ranges of the buffer.
+// In general this sounds pretty complicated though.
+
+// Well perhaps we could use the make_frame_writable thing or whatever.
+
+// Well one idea is we could
 
 int main_unused(int argc, char* argv[]) {
     if (signal(SIGSEGV, segvHandler) == SIG_ERR) {
