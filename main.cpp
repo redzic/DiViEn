@@ -1,4 +1,6 @@
 #include <array>
+#include <asio/socket_base.hpp>
+#include <asio/use_awaitable.hpp>
 #include <cerrno>
 #include <chrono>
 #include <cmath>
@@ -38,6 +40,8 @@ extern "C" {
 #include <libavutil/pixfmt.h>
 #include <libavutil/rational.h>
 }
+
+// #define ASIO_ENABLE_HANDLER_TRACKING
 
 #if defined(__ORDER_LITTLE_ENDIAN__) && defined(__ORDER_BIG_ENDIAN__) &&       \
     defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
@@ -187,6 +191,9 @@ AVPixelFormat av_pix_fmt_supported_version(AVPixelFormat pix_fmt) {
     }
 }
 
+// TODO ensure that two clients don't run in the same directory.
+// For now at least tell the user that they shouldn't do this.
+
 // allocates entire buffer upfront
 // single threaded version
 // TODO maybe implement as callback instead
@@ -195,9 +202,9 @@ int encode_frames(const char* file_name, std::span<AVFrame*> frame_buffer,
     DvAssert(!frame_buffer.empty());
 
     // TODO is it possible to reuse encoder instances?
-    // const auto* codec = avcodec_find_encoder_by_name("libx264");
+    const auto* codec = avcodec_find_encoder_by_name("libx264");
     // const auto* codec = avcodec_find_encoder_by_name("libx265");
-    const auto* codec = avcodec_find_encoder_by_name("libaom-av1");
+    // const auto* codec = avcodec_find_encoder_by_name("libaom-av1");
     // so avcodeccontext is used for both encoding and decoding...
     // TODO make this its own class
     auto* avcc = avcodec_alloc_context3(codec);
@@ -219,13 +226,13 @@ int encode_frames(const char* file_name, std::span<AVFrame*> frame_buffer,
         av_pix_fmt_supported_version((AVPixelFormat)frame_buffer[0]->format);
 
     // X264/5:
-    // av_opt_set(avcc->priv_data, "crf", "25", 0);
-    // av_opt_set(avcc->priv_data, "preset", "veryfast", 0);
+    av_opt_set(avcc->priv_data, "crf", "25", 0);
+    av_opt_set(avcc->priv_data, "preset", "veryfast", 0);
     // AOM:
-    av_opt_set(avcc->priv_data, "cpu-used", "6", 0);
-    av_opt_set(avcc->priv_data, "end-usage", "q", 0);
+    // av_opt_set(avcc->priv_data, "cpu-used", "6", 0);
+    // av_opt_set(avcc->priv_data, "end-usage", "q", 0);
+    // av_opt_set(avcc->priv_data, "cq-level", "30", 0);
     // av_opt_set(avcc->priv_data, "enable-qm", "1", 0);
-    av_opt_set(avcc->priv_data, "cq-level", "30", 0);
 
     // RAV1E:
     // av_opt_set(avcc->priv_data, "speed", "7", 0);
@@ -567,10 +574,33 @@ void main_encode_loop(const char* out_filename, DecodeContext& d_ctx) {
 #include <asio/ip/tcp.hpp>
 #include <asio/signal_set.hpp>
 #include <asio/write.hpp>
-#include <cstdio>
 #include <iostream>
 
+using asio::awaitable;
+using asio::co_spawn;
+using asio::detached;
+using asio::use_awaitable;
 using asio::ip::tcp;
+namespace this_coro = asio::this_coro;
+
+// TODO check if sanitizers can catch these bugs
+
+// in theory passing a reference here should be safe because
+// it always comes from `echo`, which is owned
+// awaitable<void> echo_once(tcp::socket& socket, int i) {
+//     char data[128];
+//     std::size_t n =
+//         co_await socket.async_read_some(asio::buffer(data),
+//         asio::redirect_error(use_awaitable, error));
+//     printf("[i=%d] Read %d bytes\n", i, (int)n);
+//     co_await async_write(socket, asio::buffer(data, n),
+//     asio::redirect_error(use_awaitable, error));
+// }
+
+// echo LOOP
+
+// alright so THANKFULLY this seems to automatically work with
+// multiple connections, it's not blocking on only one thing.
 
 // TODO.
 // perhaps we could avoid the overhead of redundantly reading from files.
@@ -599,14 +629,21 @@ using asio::ip::tcp;
 
 // yeah so we should DEFINITELY use a bigger buffer size than 2048 bytes lol.
 
-constexpr size_t TCP_BUFFER_SIZE = 2048z * 32; // 64 Kb buffer
+// TODO does all the other code work if we receive a size
+// bigger than what the buffer can handle? Don't we need some
+// loops in that case
+constexpr size_t TCP_BUFFER_SIZE = 2048z * 32 * 4; // 64 Kb buffer
 
 // TODO move networking code to another flie.
 
 // Returns number of bytes read.
-size_t socket_write_all_from_file(
+// TODO make async.
+[[nodiscard]] awaitable<size_t> socket_write_all_from_file(
     tcp::socket& socket, const char* filename,
     asio::error_code& error) { // Open a file in read mode
+
+    printf("Called socket_write_all_from_file\n");
+
     make_file(fptr, filename, "rb");
 
     std::array<uint8_t, TCP_BUFFER_SIZE> read_buf;
@@ -617,20 +654,34 @@ size_t socket_write_all_from_file(
     // TODO error handling
     size_t n_read = 0;
     size_t total_read = 0;
+    // TODO perhaps just reuse n_read variable in case the compiler doesn't
+    // realize
     while ((n_read = fread(read_buf.data(), 1, read_buf.size(), fptr.get())) >
            0) {
+        // this probably doesn't even work man.
         // I believe this should work.
         // TODO FIX ENDIANNESS!!!!
+        // TODO error handling
         header = n_read;
-        asio::write(socket, asio::buffer(&header, sizeof(header)), error);
-        asio::write(socket, asio::buffer(read_buf, n_read), error);
+        DvAssert(co_await asio::async_write(
+                     socket, asio::buffer(&header, sizeof(header)),
+                     asio::redirect_error(use_awaitable, error)) == 4);
+        // TODO: check if destructors properly run with co_return.
+        // They probably do but just making sure.
+        DvAssert(co_await asio::async_write(
+                     socket, asio::buffer(read_buf, n_read),
+                     asio::redirect_error(use_awaitable, error)) == n_read);
+        printf("Wrote %zu bytes\n", n_read);
+
         total_read += n_read;
     }
     header = 0;
-    DvAssert(
-        asio::write(socket, asio::buffer(&header, sizeof(header)), error) == 4);
+    DvAssert(co_await asio::async_write(
+                 socket, asio::buffer(&header, sizeof(header)),
+                 asio::redirect_error(
+                     asio::redirect_error(use_awaitable, error), error)) == 4);
 
-    return total_read;
+    co_return total_read;
 }
 
 // TODO check on godbolt if the compiler auto dedups
@@ -638,9 +689,9 @@ size_t socket_write_all_from_file(
 // I imagine it prob doesn't. But who knows. I mean .
 // Yeah probably not. But we should check
 // how to make it dedup it.
-template <typename Functor> size_t print_transfer_speed(Functor f) {
+template <typename Functor> awaitable<size_t> print_transfer_speed(Functor f) {
     auto start = now();
-    size_t bytes = f();
+    size_t bytes = co_await f();
 
     if (bytes != 0) {
         auto elapsed_us = dist_us(start, now());
@@ -654,15 +705,21 @@ template <typename Functor> size_t print_transfer_speed(Functor f) {
         printf(" [%ld ms] %.1f MB/s throughput (%.0f Mbps)\n",
                elapsed_us / 1000, mb_s, 8.0 * mb_s);
     }
-    return bytes;
+    co_return bytes;
 }
 
+// does directly returning the awaitable from here also work?
+// I mean, it seemed to.
 #define DISPLAY_SPEED(arguments)                                               \
-    print_transfer_speed([&]() { return arguments; })
+    print_transfer_speed(                                                      \
+        [&]() -> awaitable<size_t> { co_return co_await (arguments); })
 
 // Returns number of bytes received
-size_t socket_read_all_to_file(tcp::socket& socket, const char* filename,
-                               asio::error_code& error) {
+[[nodiscard]] awaitable<size_t>
+socket_read_all_to_file(tcp::socket& socket, const char* filename,
+                        asio::error_code& error) {
+    printf("Called socket_read_all_to_file\n");
+
     make_file(fptr, filename, "wb");
     size_t written = 0;
     uint32_t header = 0;
@@ -674,30 +731,41 @@ size_t socket_read_all_to_file(tcp::socket& socket, const char* filename,
         // this doesn't sufficiently block for the data to be receieved from the
         // client
         // we should definitely like, handle connection closes properly.
-        size_t nread =
-            asio::read(socket, asio::buffer(&header, sizeof(header)), error);
+        size_t nread = co_await asio::async_read(
+            socket, asio::buffer(&header, sizeof(header)),
+            asio::redirect_error(use_awaitable, error));
 
         if (error == asio::error::eof) {
-            break;
+            // break;
+            printf("received eof\n");
+            co_return 0;
         }
 
         if (header == 0) {
+            printf("header was 0.\n");
             break;
         }
 
         DvAssert(nread == 4);
 
         size_t len = 0;
-        DvAssert((len = asio::read(socket, asio::buffer(buf, header), error)) ==
-                 header);
+        // TODO make a wrapper for this man.
+        // TODO yeah pretty sure if header > buf.size(),
+        // this doesn't read all the bytes.
+        DvAssert(header <= buf.size());
+        DvAssert((len = co_await asio::async_read(
+                      socket, asio::buffer(buf, header),
+                      asio::redirect_error(use_awaitable, error))) == header);
 
         // now we are no longer relying on the connection closing via eof
         if (error == asio::error::eof) {
             printf("UNEXPECTED EOF\n");
-            return 0;
+            co_return 0;
         } else if (error) {
             throw asio::system_error(error); // Some other error.}
         }
+
+        printf("Read %zu bytes\n", len);
 
         // assume successful call (in release mode)
         DvAssert(fwrite(buf.data(), 1, len, fptr.get()) == len);
@@ -706,7 +774,7 @@ size_t socket_read_all_to_file(tcp::socket& socket, const char* filename,
     }
     // printf("Wrote %zu bytes to %s\n", written, filename);
 
-    return written;
+    co_return written;
 }
 
 // new protocol, receive and send N chunks
@@ -715,64 +783,100 @@ size_t socket_read_all_to_file(tcp::socket& socket, const char* filename,
 
 // TODO (long term) Honestly using bittorrent to distribute the chunks
 // among other stuff is probably the way to go.
+// TODO is it possible to move ownership and return it back? Without a ton of
+// overhead?
+// TODO remove context parameter
+[[nodiscard]] awaitable<void>
+server_handle_client_conn(asio::io_context& context, tcp::socket socket,
+                          unsigned int conn_num, unsigned int nb_segments,
+                          std::span<ConcatRange> seg_result) {
+    printf("Entered handle_conn\n");
+
+    asio::error_code error;
+
+    // BOOST_ASIO_ENABLE_HANDLER_TRACKING  exists
+
+    auto use_file = [&](const char* fname) -> awaitable<void> {
+        printf("Sending '%s' to client\n", fname);
+        // Send payload to encode to client
+        // print_transfer_speed
+        auto bytes1 = co_await socket_write_all_from_file(socket, fname, error);
+        printf("Sent %zu bytes to client\n", bytes1);
+
+        // TODO. It would be faster to transfer the encoded packets
+        // as they are complete, so we do stuff in parallel.
+        // Instead of waiting around for chunks to be entirely finished.
+
+        // Receive back encoded data
+        // TODO the display on this is totally misleading
+        // because it takes into account the encoding time as well.
+        // Fixing this would require a redesign to the protocol I guess.
+        std::array<char, 64> recv_buf;
+        (void)snprintf(recv_buf.data(), recv_buf.size(), "recv_client_%s",
+                       fname);
+        auto bytes =
+            co_await socket_read_all_to_file(socket, recv_buf.data(), error);
+        printf("Read back %zu bytes [from client #%d]\n", bytes, conn_num);
+    };
+
+    // unfortunately this is the only real solution to this problem
+    ITER_SEGFILES(co_await use_file, nb_segments, seg_result);
+
+    co_return;
+}
+
+// memory leaks happen when I do ctrl+C...
+// Is that supposed to happen?
+
+// also TODO need to add mechanism to shutdown server
 
 // source_file is the file to segment and encode
-void run_server(const char* source_file) {
+// void run_server(const char* source_file) {
+// yeah so this needs to use async functions I believe
+awaitable<void> run_server(asio::io_context& context, const char* source_file) {
     unsigned int nb_segments = 0;
     auto seg_result = segment_video_fully(source_file, nb_segments);
 
-    asio::io_context io_context;
     asio::error_code error;
 
-    tcp::acceptor acceptor(io_context, tcp::endpoint(tcp::v4(), 7878));
+    auto executor = co_await this_coro::executor;
+    tcp::acceptor acceptor(executor, {tcp::v4(), 7878});
 
-    printf("Listening for connections (synchronous)...\n");
-    int conn_num = 1;
-    while (true) {
-        tcp::socket socket(io_context);
-        acceptor.accept(socket);
+    printf("[Async] Listening for connections...\n");
+    for (unsigned int i = 1;; i++) {
+        tcp::socket socket = co_await acceptor.async_accept(
+            asio::redirect_error(use_awaitable, error));
 
-        printf("[TCP] Connection %d accepted\n", conn_num);
+        printf("[TCP] Connection %d accepted\n", i);
 
-        iter_segfiles(
-            [&socket, &error](const char* fname) {
-                printf("Sending '%s' to client\n", fname);
-                // Send payload to encode to client
-                auto bytes1 = DISPLAY_SPEED(
-                    socket_write_all_from_file(socket, fname, error));
-                printf("Sent %zu bytes to client\n", bytes1);
+        co_spawn(executor,
+                 server_handle_client_conn(context, std::move(socket), i,
+                                           nb_segments, seg_result),
+                 detached);
 
-                // TODO. It would be faster to transfer the encoded packets
-                // as they are complete, so we do stuff in parallel.
-                // Instead of waiting around for chunks to be entirely finished.
-
-                // Receive back encoded data
-                // TODO the display on this is totally misleading
-                // because it takes into account the encoding time as well.
-                // Fixing this would require a redesign to the protocol I guess.
-                std::array<char, 64> recv_buf;
-                (void)snprintf(recv_buf.data(), recv_buf.size(),
-                               "recv_client_%s", fname);
-                auto bytes = DISPLAY_SPEED(
-                    socket_read_all_to_file(socket, recv_buf.data(), error));
-                printf("Read back %zu bytes from client\n", bytes);
-
-                // read all data
-            },
-            nb_segments, seg_result);
-
-        printf("[TCP] Connection %d closed\n", conn_num++);
+        printf("[TCP] Connection %d closed\n", i);
     }
+
+    co_return;
 }
 
-void run_client() {
-    asio::io_context io_context;
-    tcp::resolver resolver(io_context);
+// So the client doesn't even have to be async.
+// that can just be regular old sync.
 
-    auto endpoints = resolver.resolve("localhost", "7878");
+template <typename F> struct OnReturn {
+    F f;
 
-    tcp::socket socket(io_context);
-    asio::connect(socket, endpoints);
+    explicit OnReturn(F f_) : f(f_) {}
+    OnReturn(const OnReturn&) = delete;
+    OnReturn(OnReturn&&) = delete;
+    ~OnReturn() { f(); }
+};
+
+// TODO. Perhaps the client should run, because it might lower throughput.
+awaitable<void> run_client(asio::io_context& io_context, tcp::socket socket,
+                           asio::error_code& error) {
+    // I really can't be bothered
+    OnReturn io_context_stopper([&]() { io_context.stop(); });
 
     printf("Connected to server\n");
 
@@ -797,7 +901,10 @@ void run_client() {
 
     // we are receiving file from server here
 
-    asio::error_code error;
+    // TODO I need to detect when the client sends some nonsense.
+    // Rn there are no checks.
+
+    // TODO fix gcc warnings.
 
     // where to dump the input file from the server
     size_t work_idx = 0;
@@ -809,9 +916,12 @@ void run_client() {
 
         // Read payload from server.
         // -nan mbps is coming from when this returns 0
-        size_t nwritten = DISPLAY_SPEED(
+        size_t nwritten = co_await DISPLAY_SPEED(
             socket_read_all_to_file(socket, input_buf.data(), error));
-        if (nwritten == 0) {
+        printf("Read %zu bytes from server\n", nwritten);
+
+        if (error == asio::error::eof || nwritten == 0) {
+            printf("exiting...\n");
             break;
         }
 
@@ -830,13 +940,15 @@ void run_client() {
 
         // Send the encoded result to the server.
         // need to check
-        DISPLAY_SPEED(
+        co_await DISPLAY_SPEED(
             socket_write_all_from_file(socket, output_buf.data(), error));
 
         printf("Uploaded %s to server\n", output_buf.data());
 
         work_idx++;
     }
+    printf("Finished run_client()\n");
+    co_return;
 }
 
 // the problem with using the same buffer and holding the decoder
@@ -846,6 +958,9 @@ void run_client() {
 // Because you would just have to store a huge number of frames.
 
 // there's a memory leak with x265_malloc but what can I do about that...
+// I mean actually I might be able to do something about it.
+// I should double check if I had that one flag enabled for extra
+// tracing info or whatever.
 
 // tests vs av1an
 //  ./target/release/av1an -i ~/avdist/OUTPUT28_29.mp4 --passes 1 --split-method
@@ -897,12 +1012,54 @@ int main(int argc, char* argv[]) {
     try {
 
         if (mode == "server") {
-            const char* from_file = "/home/yusuf/avdist/OUTPUT28_29.mp4";
+            // const char* from_file = "/home/yusuf/avdist/OUTPUT0.mp4";
+            const char* from_file = "/home/yusuf/avdist/test_x265.mp4";
 
-            // Now the TODO is to keep track of
-            run_server(from_file);
+            printf("Starting server...\n");
+            asio::io_context io_context(1);
+
+            asio::signal_set signals(io_context, SIGINT, SIGTERM);
+            signals.async_wait([&](auto, auto) { io_context.stop(); });
+
+            co_spawn(io_context, run_server(io_context, from_file), detached);
+
+            io_context.run();
+
         } else if (mode == "client") {
-            run_client();
+
+            // TODO deduplicate code, as it's exact same between client and
+            // server
+            // a really cursed way would be with both executing this code and
+            // then a goto + table.
+            // Like you would do if server, set index=0, goto this. code,
+            // goto[index]. same for other one
+            asio::io_context io_context(1);
+
+            asio::signal_set signals(io_context, SIGINT, SIGTERM);
+            signals.async_wait([&](auto, auto) { io_context.stop(); });
+
+            tcp::resolver resolver(io_context);
+
+            auto endpoints = resolver.resolve("localhost", "7878");
+            asio::error_code error;
+
+            tcp::socket socket(io_context);
+            asio::connect(socket, endpoints, error);
+
+            if (error) {
+                // TODO any way to avoid constructing std::string?
+                auto msg = error.message();
+                printf("Error occurred connecting to server: %s\n",
+                       msg.c_str());
+                return -1;
+            }
+
+            co_spawn(io_context,
+                     run_client(io_context, std::move(socket), error),
+                     detached);
+
+            io_context.run();
+
         } else if (mode == "standalone") {
             if (argc < 3) {
                 printf(
@@ -921,7 +1078,6 @@ int main(int argc, char* argv[]) {
     } catch (std::exception& e) {
         printf("Exception: %s\n", e.what());
     }
-    return 0;
 }
 
 // bruh what's a solution...

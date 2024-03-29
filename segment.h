@@ -5,6 +5,21 @@
 #include <span>
 #include <vector>
 
+// TODO (IMPORTANT)
+// figure out how to move this asio stuff out of here man
+
+// #include <asio.hpp>
+// #include <asio/co_spawn.hpp>
+// #include <asio/detached.hpp>
+// #include <asio/io_context.hpp>
+// #include <asio/ip/tcp.hpp>
+// #include <asio/signal_set.hpp>
+// #include <asio/write.hpp>
+
+// using asio::awaitable;
+
+// using asio::use_awaitable;
+
 // extern "C" {
 // #include <libavformat/avformat.h>
 // #include <libavutil/timestamp.h>
@@ -76,6 +91,31 @@ constexpr size_t EST_NB_SEGMENTS = 1100;
 
 // reasonable estimate for packets per segment
 constexpr size_t EST_PKTS_PER_SEG = 140;
+
+// TODO should read up on the "dirty" aspect of macros or whatever
+// and what workarounds we should use.
+// macro version
+#define ITER_SEGFILES(macro_use_file, macro_nb_segments, macro_segs)           \
+    {                                                                          \
+        std::array<char, 64> fname_buf{};                                      \
+        uint32_t i = 0;                                                        \
+        for (const auto& r : (macro_segs)) {                                   \
+            while (i < r.low) {                                                \
+                (void)snprintf(fname_buf.data(), fname_buf.size(),             \
+                               "OUTPUT%d.mp4", i++);                           \
+                macro_use_file(fname_buf.data());                              \
+            }                                                                  \
+            (void)snprintf(fname_buf.data(), fname_buf.size(),                 \
+                           "OUTPUT_%d_%d.mp4", r.low, r.high);                 \
+            macro_use_file(fname_buf.data());                                  \
+            i = r.high + 1;                                                    \
+        }                                                                      \
+        while (i < (macro_nb_segments)) {                                      \
+            (void)snprintf(fname_buf.data(), fname_buf.size(), "OUTPUT%d.mp4", \
+                           i++);                                               \
+            macro_use_file(fname_buf.data());                                  \
+        }                                                                      \
+    }
 
 // TODO make SURE this code works man.
 // F(uint32_t segment_index)
