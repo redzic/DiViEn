@@ -793,7 +793,8 @@ socket_read_all_to_file(tcp_socket& socket, const char* filename,
 // TODO remove context parameter
 [[nodiscard]] awaitable<void>
 handle_conn(asio::io_context& context, tcp_socket socket, unsigned int conn_num,
-            unsigned int nb_segments, std::span<ConcatRange> seg_result) {
+            unsigned int nb_segments, std::span<ConcatRange> seg_result,
+            std::vector<Segment>& work_list, std::mutex& work_list_mutex) {
     printf("Entered handle_client\n");
 
     // So it's actually quite simple.
@@ -807,11 +808,33 @@ handle_conn(asio::io_context& context, tcp_socket socket, unsigned int conn_num,
 
     asio::error_code error;
 
-    auto use_file = [&](const char* fname) -> awaitable<void> {
-        printf("Sending '%s' to client\n", fname);
+    // bro so much stuff needs to be refactored for this
+    // the output names are all mumbo jumboed
+
+    for (;;) {
+        std::array<char, 128> fname;
+        {
+            std::lock_guard<std::mutex> guard(work_list_mutex);
+            // we can now safely access the work list
+
+            // no more work left
+            if (work_list.empty()) {
+                printf("No more work left\n");
+                co_return;
+            }
+
+            // get some work to be done
+            auto elem = work_list.back();
+            elem.fmt_name(fname.data());
+
+            work_list.pop_back();
+        }
+
+        printf("Sending '%s' to client\n", fname.data());
         // Send payload to encode to client
         // print_transfer_speed
-        auto bytes1 = co_await socket_write_all_from_file(socket, fname, error);
+        auto bytes1 =
+            co_await socket_write_all_from_file(socket, fname.data(), error);
         printf("Sent %zu bytes to client\n", bytes1);
 
         // TODO. It would be faster to transfer the encoded packets
@@ -822,16 +845,16 @@ handle_conn(asio::io_context& context, tcp_socket socket, unsigned int conn_num,
         // TODO the display on this is totally misleading
         // because it takes into account the encoding time as well.
         // Fixing this would require a redesign to the protocol I guess.
-        std::array<char, 64> recv_buf;
+        std::array<char, 128> recv_buf;
         (void)snprintf(recv_buf.data(), recv_buf.size(), "recv_client_%s",
-                       fname);
+                       fname.data());
         auto bytes =
             co_await socket_read_all_to_file(socket, recv_buf.data(), error);
         printf("Read back %zu bytes [from client #%d]\n", bytes, conn_num);
     };
 
     // unfortunately this is the only real solution to this problem
-    ITER_SEGFILES(co_await use_file, nb_segments, seg_result);
+    // ITER_SEGFILES(co_await use_file, nb_segments, seg_result);
 
     co_return;
 }
@@ -853,6 +876,7 @@ awaitable<void> run_server(asio::io_context& context, const char* source_file) {
     auto seg_result = segment_video_fully(source_file, nb_segments);
 
     auto work_list = get_file_list(nb_segments, seg_result);
+    std::mutex work_list_mutex;
 
     asio::error_code error;
 
@@ -868,7 +892,8 @@ awaitable<void> run_server(asio::io_context& context, const char* source_file) {
         co_spawn(
             // executor,
             context,
-            handle_conn(context, std::move(socket), i, nb_segments, seg_result),
+            handle_conn(context, std::move(socket), i, nb_segments, seg_result,
+                        work_list, work_list_mutex),
             detached);
 
         printf("[TCP] Connection %d closed\n", i);
@@ -924,10 +949,9 @@ awaitable<void> run_client(asio::io_context& io_context, tcp_socket socket,
     // TODO fix gcc warnings.
 
     // where to dump the input file from the server
-    size_t work_idx = 0;
     std::array<char, 64> output_buf;
     std::array<char, 64> input_buf;
-    while (true) {
+    for (size_t work_idx = 0;; work_idx++) {
         (void)snprintf(input_buf.data(), input_buf.size(),
                        "client_input_%zu.mp4", work_idx);
 
@@ -961,8 +985,6 @@ awaitable<void> run_client(asio::io_context& io_context, tcp_socket socket,
             socket_write_all_from_file(socket, output_buf.data(), error));
 
         printf("Uploaded %s to server\n", output_buf.data());
-
-        work_idx++;
     }
     co_return;
 }

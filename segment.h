@@ -80,6 +80,15 @@ struct Segment {
     [[nodiscard]] bool is_indiv() const { return high == 0; }
     [[nodiscard]] bool is_range() const { return !is_indiv(); }
 
+    void fmt_name(char* buffer) const {
+        if (is_indiv()) [[likely]] {
+            (void)sprintf(buffer, "OUTPUT%d.mp4", low);
+
+        } else {
+            (void)sprintf(buffer, "OUTPUT_%d_%d.mp4", low, high);
+        }
+    }
+
     Segment(unsigned int low_, unsigned int high_) : low(low_), high(high_) {}
 };
 
