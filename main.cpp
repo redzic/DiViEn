@@ -581,13 +581,18 @@ using asio::co_spawn;
 using asio::detached;
 using asio::use_awaitable;
 using asio::ip::tcp;
-namespace this_coro = asio::this_coro;
+
+using tcp_acceptor =
+    asio::basic_socket_acceptor<asio::ip::tcp, asio::io_context::executor_type>;
+
+using tcp_socket =
+    asio::basic_stream_socket<asio::ip::tcp, asio::io_context::executor_type>;
 
 // TODO check if sanitizers can catch these bugs
 
 // in theory passing a reference here should be safe because
 // it always comes from `echo`, which is owned
-// awaitable<void> echo_once(tcp::socket& socket, int i) {
+// awaitable<void> echo_once(tcp_socket& socket, int i) {
 //     char data[128];
 //     std::size_t n =
 //         co_await socket.async_read_some(asio::buffer(data),
@@ -639,7 +644,7 @@ constexpr size_t TCP_BUFFER_SIZE = 2048z * 32 * 4; // 64 Kb buffer
 // Returns number of bytes read.
 // TODO make async.
 [[nodiscard]] awaitable<size_t> socket_write_all_from_file(
-    tcp::socket& socket, const char* filename,
+    tcp_socket& socket, const char* filename,
     asio::error_code& error) { // Open a file in read mode
 
     printf("Called socket_write_all_from_file\n");
@@ -671,7 +676,7 @@ constexpr size_t TCP_BUFFER_SIZE = 2048z * 32 * 4; // 64 Kb buffer
         DvAssert(co_await asio::async_write(
                      socket, asio::buffer(read_buf, n_read),
                      asio::redirect_error(use_awaitable, error)) == n_read);
-        printf("Wrote %zu bytes\n", n_read);
+        // printf("Wrote %zu bytes\n", n_read);
 
         total_read += n_read;
     }
@@ -710,13 +715,15 @@ template <typename Functor> awaitable<size_t> print_transfer_speed(Functor f) {
 
 // does directly returning the awaitable from here also work?
 // I mean, it seemed to.
+// Unfortunately, this causes overhead because we're passing
+// a coroutine lambda. I guess it should be negligible mostly but still.
 #define DISPLAY_SPEED(arguments)                                               \
     print_transfer_speed(                                                      \
         [&]() -> awaitable<size_t> { co_return co_await (arguments); })
 
 // Returns number of bytes received
 [[nodiscard]] awaitable<size_t>
-socket_read_all_to_file(tcp::socket& socket, const char* filename,
+socket_read_all_to_file(tcp_socket& socket, const char* filename,
                         asio::error_code& error) {
     printf("Called socket_read_all_to_file\n");
 
@@ -765,14 +772,12 @@ socket_read_all_to_file(tcp::socket& socket, const char* filename,
             throw asio::system_error(error); // Some other error.}
         }
 
-        printf("Read %zu bytes\n", len);
+        // printf("Read %zu bytes\n", len);
 
         // assume successful call (in release mode)
         DvAssert(fwrite(buf.data(), 1, len, fptr.get()) == len);
         written += len;
-        // printf("Wrote %zu bytes to %s\n", written, filename);
     }
-    // printf("Wrote %zu bytes to %s\n", written, filename);
 
     co_return written;
 }
@@ -787,14 +792,20 @@ socket_read_all_to_file(tcp::socket& socket, const char* filename,
 // overhead?
 // TODO remove context parameter
 [[nodiscard]] awaitable<void>
-server_handle_client_conn(asio::io_context& context, tcp::socket socket,
-                          unsigned int conn_num, unsigned int nb_segments,
-                          std::span<ConcatRange> seg_result) {
-    printf("Entered handle_conn\n");
+handle_conn(asio::io_context& context, tcp_socket socket, unsigned int conn_num,
+            unsigned int nb_segments, std::span<ConcatRange> seg_result) {
+    printf("Entered handle_client\n");
+
+    // So it's actually quite simple.
+    // Instead of sending all chunks, we send chunks from a queue.
+    // That's basically it.
+    // There's also a possibility that we add stuff back to the queue.
+    // I mean tbf we can do that with mpsc as well.
+    // TODO Mutex<Vector> is probably not the most efficient approach.
+    // Maybe we should actually use a linked list or something.
+    // Find something better if possible.
 
     asio::error_code error;
-
-    // BOOST_ASIO_ENABLE_HANDLER_TRACKING  exists
 
     auto use_file = [&](const char* fname) -> awaitable<void> {
         printf("Sending '%s' to client\n", fname);
@@ -825,6 +836,10 @@ server_handle_client_conn(asio::io_context& context, tcp::socket socket,
     co_return;
 }
 
+// TODO do not use any_io_executor as it's the defualt polymorphic
+// type
+// try to use io_context::executor_type instead.
+
 // memory leaks happen when I do ctrl+C...
 // Is that supposed to happen?
 
@@ -837,22 +852,24 @@ awaitable<void> run_server(asio::io_context& context, const char* source_file) {
     unsigned int nb_segments = 0;
     auto seg_result = segment_video_fully(source_file, nb_segments);
 
+    auto work_list = get_file_list(nb_segments, seg_result);
+
     asio::error_code error;
 
-    auto executor = co_await this_coro::executor;
-    tcp::acceptor acceptor(executor, {tcp::v4(), 7878});
+    tcp_acceptor acceptor(context, {tcp::v4(), 7878});
 
     printf("[Async] Listening for connections...\n");
     for (unsigned int i = 1;; i++) {
-        tcp::socket socket = co_await acceptor.async_accept(
+        tcp_socket socket = co_await acceptor.async_accept(
             asio::redirect_error(use_awaitable, error));
 
         printf("[TCP] Connection %d accepted\n", i);
 
-        co_spawn(executor,
-                 server_handle_client_conn(context, std::move(socket), i,
-                                           nb_segments, seg_result),
-                 detached);
+        co_spawn(
+            // executor,
+            context,
+            handle_conn(context, std::move(socket), i, nb_segments, seg_result),
+            detached);
 
         printf("[TCP] Connection %d closed\n", i);
     }
@@ -873,7 +890,7 @@ template <typename F> struct OnReturn {
 };
 
 // TODO. Perhaps the client should run, because it might lower throughput.
-awaitable<void> run_client(asio::io_context& io_context, tcp::socket socket,
+awaitable<void> run_client(asio::io_context& io_context, tcp_socket socket,
                            asio::error_code& error) {
     // I really can't be bothered
     OnReturn io_context_stopper([&]() { io_context.stop(); });
@@ -921,7 +938,7 @@ awaitable<void> run_client(asio::io_context& io_context, tcp::socket socket,
         printf("Read %zu bytes from server\n", nwritten);
 
         if (error == asio::error::eof || nwritten == 0) {
-            printf("exiting...\n");
+            printf("eof, exiting...\n");
             break;
         }
 
@@ -947,7 +964,6 @@ awaitable<void> run_client(asio::io_context& io_context, tcp::socket socket,
 
         work_idx++;
     }
-    printf("Finished run_client()\n");
     co_return;
 }
 
@@ -997,7 +1013,7 @@ awaitable<void> run_client(asio::io_context& io_context, tcp::socket socket,
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
-        printf("Must specify at least 2 args.\n");
+        printf("DiViEn: must specify at least 2 args.\n");
         return -1;
     }
 
@@ -1013,6 +1029,12 @@ int main(int argc, char* argv[]) {
 
         if (mode == "server") {
             // const char* from_file = "/home/yusuf/avdist/OUTPUT0.mp4";
+            // now we need to feed each client chunks that are not done only
+            // we could do this via a global mutex and vector...
+            // well...
+            // you can't just have a global chunk index because it's
+            // not necessarily (and most likely won't) complete in
+            // linear order.
             const char* from_file = "/home/yusuf/avdist/test_x265.mp4";
 
             printf("Starting server...\n");
@@ -1043,7 +1065,7 @@ int main(int argc, char* argv[]) {
             auto endpoints = resolver.resolve("localhost", "7878");
             asio::error_code error;
 
-            tcp::socket socket(io_context);
+            tcp_socket socket(io_context);
             asio::connect(socket, endpoints, error);
 
             if (error) {

@@ -60,9 +60,27 @@ struct ConcatRange {
     unsigned int low;
     unsigned int high;
 
-    ConcatRange(auto low_, auto high_) : low(low_), high(high_) {
+    ConcatRange(unsigned int low_, unsigned int high_)
+        : low(low_), high(high_) {
         DvAssert(low_ < high_);
     }
+};
+
+// can either be range or individual segment
+struct Segment {
+    unsigned int low;
+    // high cannot be 0 under normal circumstances,
+    // because ranges are inclusive.
+    // it cannot end on 0, that would just be low=0,
+    // regardless if it's concatted or not.
+    // if high==0, we signal that to mean
+    unsigned int high;
+
+    // is individual, non concatted segment
+    [[nodiscard]] bool is_indiv() const { return high == 0; }
+    [[nodiscard]] bool is_range() const { return !is_indiv(); }
+
+    Segment(unsigned int low_, unsigned int high_) : low(low_), high(high_) {}
 };
 
 // Returns 0 for success, <0 for error.
@@ -135,6 +153,18 @@ inline void iter_segs(F output_i, G output_range, uint32_t nb_segments,
     while (i < nb_segments) {
         output_i(i++);
     }
+}
+
+inline std::vector<Segment> get_file_list(uint32_t nb_segments,
+                                          std::span<ConcatRange> segs) {
+    std::vector<Segment> segment_list{};
+    // typical ratio of around 10% being segments
+    segment_list.reserve(segs.size() * 10 + 8);
+    iter_segs(
+        [&](auto idx) { segment_list.emplace_back(idx, 0); },
+        [&](auto range) { segment_list.emplace_back(range.low, range.high); },
+        nb_segments, segs);
+    return segment_list;
 }
 
 template <typename F>
