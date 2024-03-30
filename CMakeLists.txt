@@ -49,4 +49,4 @@ pkg_check_modules(LIBAV REQUIRED IMPORTED_TARGET
 add_executable(DiViEn main.cpp decode.cpp segment.cpp)
 
 target_compile_options(DiViEn PRIVATE -Wall -Wextra -Wformat -Wno-c99-designator )
-target_link_libraries( DiViEn PkgConfig::LIBAV )
+target_link_libraries( DiViEn PkgConfig::LIBAV uring )

@@ -1,6 +1,24 @@
-#include <array>
+// gonna have to obviously disable on some configurations and whatever
+#define ASIO_HAS_IO_URING 1
+#define ASIO_DISABLE_EPOLL 1
+
+// pagecache + bypassing cache?
+
+#include <asio/detail/reactor.hpp>
+
+#include <asio.hpp>
+#include <asio/co_spawn.hpp>
+#include <asio/detached.hpp>
+#include <asio/io_context.hpp>
+#include <asio/ip/tcp.hpp>
+#include <asio/signal_set.hpp>
 #include <asio/socket_base.hpp>
 #include <asio/use_awaitable.hpp>
+#include <asio/write.hpp>
+
+// ------------------
+
+#include <array>
 #include <cerrno>
 #include <chrono>
 #include <cmath>
@@ -12,6 +30,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <iostream>
 #include <mutex>
 #include <pthread.h>
 #include <span>
@@ -88,6 +107,10 @@ void segvHandler(int /*unused*/) {
 // to different nodes if one is not doing it fast enough.
 // To do this we could have some features in our vec of
 //
+
+// 128 chars is a good size I think
+// Could even be reduced to 64
+using fmt_buf = std::array<char, 128>;
 
 template <class> inline constexpr bool always_false_v = false;
 
@@ -279,6 +302,9 @@ int worker_thread(unsigned int worker_id, DecodeContext& decoder,
                   EncodeLoopState& state) {
     while (true) {
         // should only access decoder once lock has been acquired
+        // uh should we replace with like unique_lock or lock_guard
+        // or something like that?
+        // idk how save this is
         state.global_decoder_mutex.lock();
 
         // decode CHUNK_FRAME_SIZE frames into frame buffer
@@ -388,13 +414,18 @@ void main_encode_loop(const char* out_filename, DecodeContext& d_ctx) {
     // even if we have dynamic workers, I believe we
     // can use alloca. Not really totally ideal but,
     // whatever. Or just array with max capacity.
-    std::vector<std::thread> thread_vector{};
-    thread_vector.reserve(NUM_WORKERS);
+    // std::vector<std::thread> thread_vector{};
+    // thread_vector.reserve(NUM_WORKERS);
+    std::array<std::thread, NUM_WORKERS> thread_vector;
 
     // spawn worker threads
     for (unsigned int i = 0; i < NUM_WORKERS; i++) {
-        thread_vector.emplace_back(&worker_thread, i, std::ref(d_ctx),
-                                   std::ref(state));
+        // TODO I think it's theoretically possible
+        // that constructing the threads fail, in which case
+        // the memory needs to be cleaned up differently (I think).
+        // Since otherwise we'd be destructing unallocated objects.
+        new (&thread_vector[i])
+            std::thread(&worker_thread, i, std::ref(d_ctx), std::ref(state));
     }
 
     printf("frame= 0  (0 fps)\n");
@@ -424,7 +455,11 @@ void main_encode_loop(const char* out_filename, DecodeContext& d_ctx) {
         // for checking if all threads have completed.
         auto local_start = now();
         // TODO Is this guaranteed to deal with "spurious wakes"?
+        // The documentation does specfically say it can be woken spuriously.
+        // but that was for wait not wait_for.
         auto status = state.cv.wait_for(lk, std::chrono::seconds(1));
+        // bruh where should we unlock this
+        // lk.unlock();
 
         auto n_frames = state.nb_frames_done.load();
         auto frame_diff = n_frames - last_frames;
@@ -490,6 +525,12 @@ void main_encode_loop(const char* out_filename, DecodeContext& d_ctx) {
     // but we need to call .join() anyways.
     for (auto& t : thread_vector) {
         t.join();
+        // should we call this? I'm not sure.
+        // asan/ubsan doesn't complain but at the same time
+        // aren't the destructors already called?
+        // and from some tests it does seem like
+        // you can easily do a double free if you want to...
+        // t.~thread();
     }
 
     // there is no active lock on the mutex since all threads
@@ -567,19 +608,11 @@ void main_encode_loop(const char* out_filename, DecodeContext& d_ctx) {
 
 // we could also possibly look into using bittorrent.
 
-#include <asio.hpp>
-#include <asio/co_spawn.hpp>
-#include <asio/detached.hpp>
-#include <asio/io_context.hpp>
-#include <asio/ip/tcp.hpp>
-#include <asio/signal_set.hpp>
-#include <asio/write.hpp>
-#include <iostream>
-
 using asio::awaitable;
 using asio::co_spawn;
 using asio::detached;
 using asio::use_awaitable;
+using asio::use_future;
 using asio::ip::tcp;
 
 using tcp_acceptor =
@@ -637,7 +670,7 @@ using tcp_socket =
 // TODO does all the other code work if we receive a size
 // bigger than what the buffer can handle? Don't we need some
 // loops in that case
-constexpr size_t TCP_BUFFER_SIZE = 2048z * 32 * 4; // 64 Kb buffer
+constexpr size_t TCP_BUFFER_SIZE = 2048z * 32 * 4; // 256 Kb buffer
 
 // TODO move networking code to another flie.
 
@@ -707,8 +740,8 @@ template <typename Functor> awaitable<size_t> print_transfer_speed(Functor f) {
         // TODO : to make this more accurate, only count
         // the times we are actually waiting on the file (not disk write
         // times)
-        printf(" [%ld ms] %.1f MB/s throughput (%.0f Mbps)\n",
-               elapsed_us / 1000, mb_s, 8.0 * mb_s);
+        printf(" [%.3f ms] %.1f MB/s throughput (%.0f Mbps)\n",
+               static_cast<double>(elapsed_us) * 0.001, mb_s, 8.0 * mb_s);
     }
     co_return bytes;
 }
@@ -721,13 +754,25 @@ template <typename Functor> awaitable<size_t> print_transfer_speed(Functor f) {
     print_transfer_speed(                                                      \
         [&]() -> awaitable<size_t> { co_return co_await (arguments); })
 
+// TODO instead of taking string argument, perhaps I should take
+// a reference to a fixed size array and use snprintf.
+
+// TODO come up with a better name for this function and the write version
+// This is just an ugly name man.
 // Returns number of bytes received
 [[nodiscard]] awaitable<size_t>
-socket_read_all_to_file(tcp_socket& socket, const char* filename,
+socket_read_all_to_file(tcp_socket& socket, const char* dumpfile,
                         asio::error_code& error) {
     printf("Called socket_read_all_to_file\n");
 
-    make_file(fptr, filename, "wb");
+    // TODO ideally we don't create any file unless we at least read the header
+    // or something. I think that wouldn't even be hard to do actually.
+    make_file(fptr, dumpfile, "wb");
+    if (fptr.get() == nullptr) {
+        printf("fopen() error: %s\n", strerror(errno));
+    }
+
+    DvAssert(fptr.get() != nullptr);
     size_t written = 0;
     uint32_t header = 0;
     while (true) {
@@ -749,10 +794,10 @@ socket_read_all_to_file(tcp_socket& socket, const char* filename,
         }
 
         if (header == 0) {
-            printf("header was 0.\n");
+            printf("header was 0 (means end of data stream according to "
+                   "protocol).\n");
             break;
         }
-
         DvAssert(nread == 4);
 
         size_t len = 0;
@@ -791,11 +836,35 @@ socket_read_all_to_file(tcp_socket& socket, const char* filename,
 // TODO is it possible to move ownership and return it back? Without a ton of
 // overhead?
 // TODO remove context parameter
-[[nodiscard]] awaitable<void>
-handle_conn(asio::io_context& context, tcp_socket socket, unsigned int conn_num,
-            unsigned int nb_segments, std::span<ConcatRange> seg_result,
-            std::vector<Segment>& work_list, std::mutex& work_list_mutex) {
+
+// I think we also need to pass a condition variable here.
+// perhaps we should just put all of this in one struct.
+// This is getting really complicated man.
+
+// handle_conn will signify every time a chunk is done, I guess.
+// Or perhaps we can only signal if the total chunks done equals the
+
+// owned data
+struct ServerData {
+    uint32_t orig_work_size;
+    std::atomic<uint32_t> chunks_done;
+    std::vector<Segment> work_list;
+    std::mutex work_list_mutex;
+
+    // for thread killing
+    std::condition_variable tk_cv;
+    std::mutex tk_cv_m;
+};
+
+// like number of chunks that there are.
+
+[[nodiscard]] awaitable<void> handle_conn(asio::io_context& context,
+                                          tcp_socket socket,
+                                          unsigned int conn_num,
+                                          ServerData& state) {
     printf("Entered handle_client\n");
+    // so we need to signal to the main thread that we are uh
+    // waiting and shit.
 
     // So it's actually quite simple.
     // Instead of sending all chunks, we send chunks from a queue.
@@ -811,26 +880,38 @@ handle_conn(asio::io_context& context, tcp_socket socket, unsigned int conn_num,
     // bro so much stuff needs to be refactored for this
     // the output names are all mumbo jumboed
 
-    for (;;) {
-        std::array<char, 128> fname;
+    for (int i = 0;; i++) {
+        fmt_buf fname;
         {
-            std::lock_guard<std::mutex> guard(work_list_mutex);
+            std::lock_guard<std::mutex> guard(state.work_list_mutex);
             // we can now safely access the work list
 
             // no more work left
-            if (work_list.empty()) {
+            // if (work_list.empty() || (conn_num > 1)) {
+            if (state.work_list.empty()) {
+
                 printf("No more work left\n");
+                // Just because the work list is empty doesn't mean
+                // the work has been completed. It just means
+                // it's been ALLOCATED (distributed).
+                // And we really shouldn't use context.stop() either...
+                // so I think socket only shuts down the current one
+                // socket.shutdown(asio::socket_base::shutdown_receive);
+                // yeah we can't just do this..
+                // we would have to make sure ALL OTHER
+                // clients are stopped too...
+                // context.stop();
                 co_return;
             }
 
             // get some work to be done
-            auto elem = work_list.back();
+            auto elem = state.work_list.back();
             elem.fmt_name(fname.data());
 
-            work_list.pop_back();
+            state.work_list.pop_back();
         }
 
-        printf("Sending '%s' to client\n", fname.data());
+        printf("Sending '%s' to client #%d\n", fname.data(), conn_num);
         // Send payload to encode to client
         // print_transfer_speed
         auto bytes1 =
@@ -840,23 +921,38 @@ handle_conn(asio::io_context& context, tcp_socket socket, unsigned int conn_num,
         // TODO. It would be faster to transfer the encoded packets
         // as they are complete, so we do stuff in parallel.
         // Instead of waiting around for chunks to be entirely finished.
+        // I think we can even do this without changing the protocol.
 
         // Receive back encoded data
         // TODO the display on this is totally misleading
         // because it takes into account the encoding time as well.
         // Fixing this would require a redesign to the protocol I guess.
-        std::array<char, 128> recv_buf;
+
+        // TODO add verify work option or something, ensures packet count is
+        // what was expected. Or you could call it trust_workers or something.
+        // which is set to false by default. Or whatever.
+        fmt_buf recv_buf;
         (void)snprintf(recv_buf.data(), recv_buf.size(), "recv_client_%s",
                        fname.data());
         auto bytes =
             co_await socket_read_all_to_file(socket, recv_buf.data(), error);
         printf("Read back %zu bytes [from client #%d]\n", bytes, conn_num);
-    };
+
+        // here we receive encoded data
+        printf("Attempting to retrieve lock guard...\n");
+        std::lock_guard<std::mutex> lk(state.tk_cv_m);
+        printf("Calling notify\n");
+        // if (state.nb_segments==state.)
+        state.chunks_done++;
+        // not entirely sure if this lock is really necessary
+        state.tk_cv.notify_one();
+    }
 
     // unfortunately this is the only real solution to this problem
     // ITER_SEGFILES(co_await use_file, nb_segments, seg_result);
 
-    co_return;
+    // should never be reached.
+    // co_return;
 }
 
 // TODO do not use any_io_executor as it's the defualt polymorphic
@@ -868,37 +964,90 @@ handle_conn(asio::io_context& context, tcp_socket socket, unsigned int conn_num,
 
 // also TODO need to add mechanism to shutdown server
 
-// source_file is the file to segment and encode
-// void run_server(const char* source_file) {
-// yeah so this needs to use async functions I believe
-awaitable<void> run_server(asio::io_context& context, const char* source_file) {
-    unsigned int nb_segments = 0;
-    auto seg_result = segment_video_fully(source_file, nb_segments);
+// there's an issue here man.
+awaitable<void> kill_context(asio::io_context& context) {
+    context.stop();
+
+    co_return;
+}
+
+// alright well this does seem to work
+// and the io_context
+// is there a better approach though?
+// kills the io_context when all work is finished.
+// https://en.cppreference.com/w/cpp/thread/condition_variable/wait
+void server_stopper_thread(asio::io_context& context, ServerData& data) {
+    std::unique_lock<std::mutex> lk(data.tk_cv_m);
+    data.tk_cv.wait(lk,
+                    [&]() { return data.orig_work_size == data.chunks_done; });
+
+    co_spawn(context, kill_context(context), detached);
+}
+
+// god this code is messy
+auto server_prepare_work(const char* source_file, unsigned int& nb_segments) {
+    unsigned int n_segments = 0;
+    auto seg_result = segment_video_fully(source_file, n_segments);
+    nb_segments = n_segments;
 
     auto work_list = get_file_list(nb_segments, seg_result);
-    std::mutex work_list_mutex;
+    return work_list;
+}
+
+// TODO remove unused arguments
+awaitable<void> run_server(asio::io_context& context, const char* source_file,
+                           ServerData& state) {
 
     asio::error_code error;
 
     tcp_acceptor acceptor(context, {tcp::v4(), 7878});
 
     printf("[Async] Listening for connections...\n");
-    for (unsigned int i = 1;; i++) {
+    for (unsigned int conn_num = 1; conn_num <= 3; conn_num++) {
+        // OH MY GOD. This counts as work for io_context!
+        // So in theory we can remove the .stop() ont he context.
+
+        // how can we handle either waiting for the socket, or
+        // like waiting for the tasks to be finished
+
+        // the core issue is that we need to be able to cancel the async_accept
+        // which we will do by doing the io_context...
+        // oh ok I remember by original idea.
+        // Spawn another coroutine
+        // We don't need to change anything here.
+
+        // is it possible to do this without waiting though?
         tcp_socket socket = co_await acceptor.async_accept(
             asio::redirect_error(use_awaitable, error));
 
-        printf("[TCP] Connection %d accepted\n", i);
+        if (error) {
+            printf("Error connecting to client #%d: %s\n", conn_num,
+                   error.message().c_str());
+            continue;
+        }
 
-        co_spawn(
-            // executor,
-            context,
-            handle_conn(context, std::move(socket), i, nb_segments, seg_result,
-                        work_list, work_list_mutex),
-            detached);
+        printf("[TCP] Connection %d accepted\n", conn_num);
+        // next step: detect when all work has been done somehow
 
-        printf("[TCP] Connection %d closed\n", i);
+        // man this is still gonna be a lot of work left...
+
+        // uhh...
+        // this could actually be REALLY bad.
+        // since we just co_return.
+        // or wait...
+        // I think this works because we just infinitely wait for connections
+        // so the other data doesn't go out of scope or anything.
+        // Ideally we should add some kind of mechanism to track when stuff
+        // is
+        // finished.
+        co_spawn(context,
+                 handle_conn(context, std::move(socket), conn_num, state),
+                 detached);
+
+        printf("[TCP] Connection %d closed\n", conn_num);
     }
 
+    printf("Returning from run_server()\n");
     co_return;
 }
 
@@ -949,11 +1098,14 @@ awaitable<void> run_client(asio::io_context& io_context, tcp_socket socket,
     // TODO fix gcc warnings.
 
     // where to dump the input file from the server
-    std::array<char, 64> output_buf;
-    std::array<char, 64> input_buf;
+    fmt_buf output_buf;
+    fmt_buf input_buf;
     for (size_t work_idx = 0;; work_idx++) {
         (void)snprintf(input_buf.data(), input_buf.size(),
                        "client_input_%zu.mp4", work_idx);
+        //    change of protocol.
+        // First header is going to give you the filename.
+        // All subsequent headers are for the actual file data.
 
         // Read payload from server.
         // -nan mbps is coming from when this returns 0
@@ -1050,24 +1202,56 @@ int main(int argc, char* argv[]) {
     try {
 
         if (mode == "server") {
-            // const char* from_file = "/home/yusuf/avdist/OUTPUT0.mp4";
             // now we need to feed each client chunks that are not done only
             // we could do this via a global mutex and vector...
             // well...
             // you can't just have a global chunk index because it's
             // not necessarily (and most likely won't) complete in
             // linear order.
+            // const char* from_file = "/home/yusuf/avdist/OUTPUT0.mp4";
             const char* from_file = "/home/yusuf/avdist/test_x265.mp4";
+            printf("Preparing and segmenting video file '%s'...\n", from_file);
+
+            unsigned int nb_segments = 0;
+            auto work_list = server_prepare_work(from_file, nb_segments);
+            DvAssert(nb_segments > 0);
+
+            ServerData data{.orig_work_size = (uint32_t)work_list.size(),
+                            .chunks_done = 0,
+                            .work_list = std::move(work_list),
+                            .work_list_mutex = {}};
 
             printf("Starting server...\n");
             asio::io_context io_context(1);
 
+            // this always counts as work to the io_context. If this is not
+            // present, then .run() will automatically stop on its own
+            // if we remove the socket waiting code.
             asio::signal_set signals(io_context, SIGINT, SIGTERM);
             signals.async_wait([&](auto, auto) { io_context.stop(); });
 
-            co_spawn(io_context, run_server(io_context, from_file), detached);
+            // I think it will block the thread.
+            // yeah so this needs to be done on another thread...
+
+            // TODO ensure this is optimized with the constructors and
+            // everything
+
+            // TODO maybe only pass the relevant data here
+            // just hope that doesn't involve any extra copying
+            std::thread server_stopper(&server_stopper_thread,
+                                       std::ref(io_context), std::ref(data));
+
+            // all the co_spawns are safe I think because everything terminates
+            // at the end of this function
+
+            co_spawn(io_context, run_server(io_context, from_file, data),
+                     detached);
+            // maybe I could just create another async task to check for
+            // completion of tasks. That uses condition variable or something.
 
             io_context.run();
+
+            server_stopper.join();
 
         } else if (mode == "client") {
 
@@ -1146,6 +1330,8 @@ int main(int argc, char* argv[]) {
 // Well perhaps we could use the make_frame_writable thing or whatever.
 
 // Well one idea is we could
+
+// io_uring, IOCP. Can we make ASIO use these?
 
 int main_unused(int argc, char* argv[]) {
     if (signal(SIGSEGV, segvHandler) == SIG_ERR) {
