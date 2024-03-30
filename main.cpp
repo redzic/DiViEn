@@ -942,7 +942,6 @@ struct ServerData {
         printf("Attempting to retrieve lock guard...\n");
         std::lock_guard<std::mutex> lk(state.tk_cv_m);
         printf("Calling notify\n");
-        // if (state.nb_segments==state.)
         state.chunks_done++;
         // not entirely sure if this lock is really necessary
         state.tk_cv.notify_one();
@@ -1228,7 +1227,17 @@ int main(int argc, char* argv[]) {
             // present, then .run() will automatically stop on its own
             // if we remove the socket waiting code.
             asio::signal_set signals(io_context, SIGINT, SIGTERM);
-            signals.async_wait([&](auto, auto) { io_context.stop(); });
+            signals.async_wait([&](auto, auto) {
+                io_context.stop();
+
+                exit(EXIT_FAILURE);
+            });
+
+            std::thread server_stopper(&server_stopper_thread,
+                                       std::ref(io_context), std::ref(data));
+
+            co_spawn(io_context, run_server(io_context, from_file, data),
+                     detached);
 
             // I think it will block the thread.
             // yeah so this needs to be done on another thread...
@@ -1238,14 +1247,10 @@ int main(int argc, char* argv[]) {
 
             // TODO maybe only pass the relevant data here
             // just hope that doesn't involve any extra copying
-            std::thread server_stopper(&server_stopper_thread,
-                                       std::ref(io_context), std::ref(data));
 
             // all the co_spawns are safe I think because everything terminates
             // at the end of this function
 
-            co_spawn(io_context, run_server(io_context, from_file, data),
-                     detached);
             // maybe I could just create another async task to check for
             // completion of tasks. That uses condition variable or something.
 
@@ -1264,7 +1269,11 @@ int main(int argc, char* argv[]) {
             asio::io_context io_context(1);
 
             asio::signal_set signals(io_context, SIGINT, SIGTERM);
-            signals.async_wait([&](auto, auto) { io_context.stop(); });
+            signals.async_wait([&](auto, auto) {
+                io_context.stop();
+
+                exit(EXIT_FAILURE);
+            });
 
             tcp::resolver resolver(io_context);
 
