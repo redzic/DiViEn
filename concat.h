@@ -22,10 +22,171 @@ extern "C" {
 #include <libavutil/rational.h>
 }
 
+// TODO unique_ptrs aren't free with the way we're using them here.
+// or honestly it might not actually be that bad... tbf it's doing null checks
+// and stuff
+
 // TODO deduplicate packet copying loop.
 
 // TODO. Deduplicate all this code between demuxers and stuff.
 // Range passed is inclusive
+
+// TODO be able to pass arbitrary iterable object/lambda here
+
+// we're going to make another version of this that allows
+// passing an iterable
+
+// assumes iterator takes a lambda that provides
+// filenames (null terminated char*)
+
+// TODO find a way to properly deduplicate this code
+// need to find a way to set timestamps properly on this man...
+template <typename Iterable>
+[[nodiscard]] inline int concat_segments_iterable(Iterable file_iter,
+                                                  const char* out_filename) {
+    int ret = 0;
+    auto pkt = make_resource<AVPacket, av_packet_alloc, av_packet_free>();
+
+    // this should work with the way smart pointers work right?
+    if (pkt == nullptr) {
+        return -1;
+    }
+
+    // avformat_open_input automatically frees on failure so we construct
+    // the smart pointer AFTER this expression.
+
+    // So I imagine that we do a similar thing here with creating multiple input
+    // streams and just opening the concat demuxer.
+
+    const auto* concat = av_find_input_format("concat");
+    DvAssert(concat != nullptr);
+
+    {
+        // TODO. Apparently you can read from memory with
+        // AVIoContext or something like that.
+        // Ideally we should do that instead.
+        // https: // riptutorial.com/ffmpeg/example/30955/reading-from-memory
+        // Same thing applies for segmenting muxer.
+        make_file(concat_file, "concat.txt", "wb");
+        // looks like this particular construct has 0 overhead over
+        // just calling fopen/fclose manually
+
+        DvAssert(concat_file != nullptr);
+        file_iter([&](const char* file) {
+            DvAssert(fprintf(concat_file.get(), "file '%s'\n", file) > 0);
+        });
+    }
+
+    AVFormatContext* raw_demuxer = nullptr;
+    ret = avformat_open_input(&raw_demuxer, "concat.txt", concat, nullptr);
+    DvAssert(raw_demuxer != nullptr);
+    if (ret < 0) {
+        return ret;
+    }
+    auto ifmt_ctx =
+        std::unique_ptr<AVFormatContext, decltype([](AVFormatContext* ctx) {
+                            avformat_close_input(&ctx);
+                        })>(raw_demuxer);
+
+    avformat_find_stream_info(ifmt_ctx.get(), nullptr);
+
+    auto video_idx = av_find_best_stream(ifmt_ctx.get(), AVMEDIA_TYPE_VIDEO, -1,
+                                         -1, nullptr, 0);
+
+    if (video_idx < 0) {
+        return -1;
+    }
+
+    const AVOutputFormat* ofmt = nullptr;
+
+    AVFormatContext* raw_ofmt_ctx = nullptr;
+    avformat_alloc_output_context2(&raw_ofmt_ctx, nullptr, nullptr,
+                                   out_filename);
+    DvAssert(raw_ofmt_ctx != nullptr);
+
+    auto ofmt_ctx =
+        std::unique_ptr<AVFormatContext, decltype([](AVFormatContext* ctx) {
+                            avformat_free_context(ctx);
+                        })>(raw_ofmt_ctx);
+
+    ofmt = ofmt_ctx->oformat;
+    DvAssert(ofmt != nullptr);
+
+    {
+        auto* in_stream = ifmt_ctx->streams[video_idx];
+        AVCodecParameters* in_codecpar = in_stream->codecpar;
+
+        DvAssert(in_codecpar->codec_type == AVMEDIA_TYPE_VIDEO);
+
+        auto* out_stream = avformat_new_stream(ofmt_ctx.get(), nullptr);
+        if (out_stream == nullptr) {
+            fprintf(stderr, "Failed allocating output stream\n");
+            return AVERROR_UNKNOWN;
+        }
+
+        ret = avcodec_parameters_copy(out_stream->codecpar, in_codecpar);
+        if (ret < 0) {
+            fprintf(stderr, "Failed to copy codec parameters\n");
+            return ret;
+        }
+        out_stream->codecpar->codec_tag = 0;
+    }
+
+    if ((ofmt->flags & AVFMT_NOFILE) == 0) {
+        // memory leak happening here...
+        ret = avio_open(&ofmt_ctx->pb, out_filename, AVIO_FLAG_WRITE);
+        if (ret < 0) {
+            fprintf(stderr, "Could not open output file '%s'", out_filename);
+            // goto end;
+            return ret;
+            // TODO memory leak
+        }
+    }
+
+    ret = avformat_write_header(ofmt_ctx.get(), nullptr);
+    if (ret < 0) {
+        (void)fprintf(stderr, "Error occurred when opening output file\n");
+        return ret;
+    }
+
+    while (true) {
+        // so usually the timestamps that av_seek_frame takes it pts,
+        // but apparently some demuxers seek on dts. Not good.
+        // Looks like we will have to manually seek ourselves.
+        ret = av_read_frame(ifmt_ctx.get(), pkt.get());
+        if (ret < 0) {
+            break;
+        }
+
+        if (pkt->stream_index != video_idx) {
+            // TODO determine when we actually need to unref the packet.
+            av_packet_unref(pkt.get());
+            continue;
+        }
+
+        // auto ts =
+        //     seg_data.timestamps[seg_data.packet_offsets[start_i] +
+        //     pkt_index++];
+        // pkt->dts = ts.dts;
+        // pkt->pts = ts.pts;
+        pkt->pos = -1;
+
+        ret = av_interleaved_write_frame(ofmt_ctx.get(), pkt.get());
+        /* pkt is now blank (av_interleaved_write_frame() takes ownership of
+         * its contents and resets pkt), so that no unreferencing is necessary.
+         * This would be different if one used av_write_frame(). */
+        if (ret < 0) {
+            (void)fprintf(stderr, "Error muxing packet\n");
+            break;
+        }
+    }
+
+    av_write_trailer(ofmt_ctx.get());
+    avio_close(ofmt_ctx->pb);
+
+    return 0;
+}
+
 [[nodiscard]] inline int concat_segments(unsigned int start_i,
                                          unsigned int end_i,
                                          const char* out_filename,

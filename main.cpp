@@ -1,4 +1,5 @@
 // gonna have to obviously disable on some configurations and whatever
+#include "concat.h"
 #define ASIO_HAS_IO_URING 1
 #define ASIO_DISABLE_EPOLL 1
 
@@ -18,6 +19,7 @@
 
 // ------------------
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <chrono>
@@ -220,6 +222,9 @@ AVPixelFormat av_pix_fmt_supported_version(AVPixelFormat pix_fmt) {
 // allocates entire buffer upfront
 // single threaded version
 // TODO maybe implement as callback instead
+
+// TODO see if it's possible to reuse an encoder
+// by calling avcodec_open2 again.
 int encode_frames(const char* file_name, std::span<AVFrame*> frame_buffer,
                   EncodeLoopState& state) {
     DvAssert(!frame_buffer.empty());
@@ -250,7 +255,8 @@ int encode_frames(const char* file_name, std::span<AVFrame*> frame_buffer,
 
     // X264/5:
     av_opt_set(avcc->priv_data, "crf", "25", 0);
-    av_opt_set(avcc->priv_data, "preset", "veryfast", 0);
+    av_opt_set(avcc->priv_data, "preset", "ultrafast", 0);
+    // av_opt_set(avcc->priv_data, "preset", "veryfast", 0);
     // AOM:
     // av_opt_set(avcc->priv_data, "cpu-used", "6", 0);
     // av_opt_set(avcc->priv_data, "end-usage", "q", 0);
@@ -364,6 +370,7 @@ void avlog_do_nothing(void* /* unused */, int /* level */,
 // assume same naming convention
 // this is direct concatenation, nothing extra done to files.
 // hardcoded. TODO remove.
+// perhaps we could special case this for 1 input file.
 void raw_concat_files(const char* out_filename, unsigned int num_files,
                       bool delete_after = false) {
     std::array<char, 64> buf{};
@@ -390,6 +397,15 @@ void raw_concat_files(const char* out_filename, unsigned int num_files,
 // for converting [] to .at()
 
 // void encode_loop_nonchunked(DecodeContext& d_ctx) {}
+
+// TODO perhaps for tests we can try with lossless
+// encoding and compare video results.
+// perhaps the tests could use python scripts to call
+// the binary or something.
+
+// Maybe long term we could provide a C or C++ library.
+// (probaby C).
+// TODO move all the TODOs into a separate doc/file or something.
 
 // decodes everything
 // TODO need to make the output of this compatible with libav
@@ -768,8 +784,12 @@ socket_read_all_to_file(tcp_socket& socket, const char* dumpfile,
     // TODO ideally we don't create any file unless we at least read the header
     // or something. I think that wouldn't even be hard to do actually.
     make_file(fptr, dumpfile, "wb");
-    if (fptr.get() == nullptr) {
+    if (fptr == nullptr) {
+        // technically this isn't thread safe
+        // and I mean it is actually possible to access this concurrently
+        // in an unsafe way... but whatever
         printf("fopen() error: %s\n", strerror(errno));
+        co_return 0;
     }
 
     DvAssert(fptr.get() != nullptr);
@@ -880,14 +900,13 @@ struct ServerData {
     // bro so much stuff needs to be refactored for this
     // the output names are all mumbo jumboed
 
-    for (int i = 0;; i++) {
+    for (;;) {
         fmt_buf fname;
         {
             std::lock_guard<std::mutex> guard(state.work_list_mutex);
             // we can now safely access the work list
 
             // no more work left
-            // if (work_list.empty() || (conn_num > 1)) {
             if (state.work_list.empty()) {
 
                 printf("No more work left\n");
@@ -983,13 +1002,131 @@ void server_stopper_thread(asio::io_context& context, ServerData& data) {
     co_spawn(context, kill_context(context), detached);
 }
 
+// TODO
+// if we allow client sending error messages back,
+// limit the maximum size we receive.
+
+// TODO: when decoding skipped frames,
+// put them all in the same avframe.
+
 // god this code is messy
-auto server_prepare_work(const char* source_file, unsigned int& nb_segments) {
+// TODO return nb_segments as value (and all similar functions in code)
+std::vector<Segment> server_prepare_work(const char* source_file,
+                                         unsigned int& nb_segments) {
     unsigned int n_segments = 0;
-    auto seg_result = segment_video_fully(source_file, n_segments);
+    auto sg = segment_video_fully(source_file, n_segments);
     nb_segments = n_segments;
 
-    auto work_list = get_file_list(nb_segments, seg_result);
+    DvAssert(!sg.packet_offsets.empty());
+
+    auto work_list = get_file_list(nb_segments, sg.concat_ranges);
+    // TODO optimize this. We don't have to recompute the packet amounts
+    // (assuming the segmenting worked as expected)
+
+    // create chunk list
+    // bruh this is so damn messy
+    // ideally we should use another type for this because these are actually
+    // frame indexes not something else.
+    std::vector<Segment> scene_splits{};
+    constexpr uint32_t SPLIT_SIZE = 250;
+    for (uint32_t i = 0; i < sg.packet_offsets.back(); i += SPLIT_SIZE) {
+        scene_splits.emplace_back(
+            i, std::min(i + SPLIT_SIZE - 1, sg.packet_offsets.back() - 1));
+    }
+
+    printf("SCENE SPLITS\n");
+    for (auto scene : scene_splits) {
+        printf("[%d, %d], ", scene.low, scene.high);
+    }
+    printf("\n");
+
+    // bruh now we need to do the O(n) version of the algorithm...
+    // basically algorithm is just, if
+    // but the thing is...
+    // for one scene we might have like multiple splits or whatever
+    // uhhh...
+    // But it will NEVER be possible for the next split to go BACK
+    // a segment, I believe. It might use the same but will NEVER
+    // go back.
+    // for now we are operating over original unconcatenated chunks.
+    // But whatever...
+    auto print_chunk_i = [&](auto chunk_idx) {
+        printf("  Chunk i=%zu [%d, %d]\n", chunk_idx,
+               sg.packet_offsets[chunk_idx],
+               sg.packet_offsets[chunk_idx + 1] - 1);
+    };
+    auto chunki_maxidx = [&](auto chunk_idx) {
+        return sg.packet_offsets[chunk_idx + 1] - 1;
+    };
+
+    auto overlap_exists = [&](auto chunk_idx, Segment scene) {
+        auto is_overlapping = [](auto x1, auto x2, auto y1, auto y2) {
+            auto res = std::max(x1, y1) <= std::min(x2, y2);
+            // printf("OVERLAP ? %d [%d, %d], [%d, %d]\n", (int)res, x1, x2, y1,
+            //        y2);
+            return res;
+        };
+        auto c_low_idx = sg.packet_offsets[chunk_idx];
+        auto c_high_idx = chunki_maxidx(chunk_idx);
+        // printf("    [ci %zu] ", chunk_idx);
+        return is_overlapping(c_low_idx, c_high_idx, scene.low, scene.high);
+    };
+
+    // chunk idx may or may not increment.
+    // size_t chunk_idx = 0;
+    for (auto scene : scene_splits) {
+        // printf("[%d, %d] (ci %zu)\n", scene.low, scene.high, chunk_idx);
+        printf("[%d, %d]\n", scene.low, scene.high);
+
+        // Optimized version of code:
+        // (Not entirely sure if it works in all cases but it seems to so far.)
+
+        // loop_begin:
+        //     if (chunk_idx + 1 >= sg.packet_offsets.size()) {
+        //         break;
+        //     }
+
+        //     if (chunk_idx + 2 >= sg.packet_offsets.size()) {
+        //         print_chunk_i(chunk_idx);
+        //         break;
+        //     }
+
+        //     bool curr = overlap_exists(chunk_idx, scene);
+        //     bool next = overlap_exists(chunk_idx + 1, scene);
+
+        //     if (curr && next) {
+        //         print_chunk_i(chunk_idx);
+        //         // print_chunk_i(chunk_idx + 1);
+        //         chunk_idx += 1;
+        //         goto loop_begin;
+        //     } else if (!curr && next) {
+        //         print_chunk_i(chunk_idx + 1);
+        //         chunk_idx += 2;
+        //         goto loop_begin;
+        //     } else if (curr && !next) {
+        //         print_chunk_i(chunk_idx);
+        //     } else {
+        //         // !curr && !next
+        //         // DvAssert(false);
+        //         printf("[ci = %zu] Should not happen\n", chunk_idx);
+        //     }
+
+        bool found_yet = false;
+        size_t decode_nskip = 0;
+        for (size_t i = 0; i < sg.packet_offsets.size() - 1; i++) {
+            if (overlap_exists(i, scene)) {
+                print_chunk_i(i);
+                if (!found_yet) {
+                    // means this is the first chunk
+                    decode_nskip = scene.low - sg.packet_offsets[i];
+                }
+                found_yet = true;
+            }
+        }
+        printf("   nskip = %zu, ndecode = %u\n", decode_nskip,
+               scene.high - scene.low + 1);
+    }
+
     return work_list;
 }
 
@@ -1184,11 +1321,126 @@ awaitable<void> run_client(asio::io_context& io_context, tcp_socket socket,
 // TODO perhaps for debug/info purposes we can compute the "overhead"
 // of decoding unused frames? This would be for decoding segmented stuff.
 
+// There should also be periodic checks to check if the connection is still
+// alive. That way we aren't stuck with cpu0 encodes which fail because
+// the server disconnected.
+
+// ok next step is to do the segmenting and decoding thingy.
+
+#include <csignal>
+#include <cstdio>
+#include <cstdlib>
+#include <unistd.h>
+
+void my_handler(int s) {
+    printf("Caught signal %d\n", s);
+    exit(EXIT_FAILURE);
+}
+
+// TODO handle client disconnecting,
+// add that back to the chunk queue
+
+// TODO make protocol ask client
+// which chunks it's missing.
+// and only send
+
+// for verify mode/dont trust we could request
+// a hash of the segments to make sure.
+
+void run_server_full(const char* from_file) {
+    printf("Preparing and segmenting video file '%s'...\n", from_file);
+
+    unsigned int nb_segments = 0;
+    // ok we need to get the packet counts out of this.
+    auto work_list = server_prepare_work(from_file, nb_segments);
+    // use this to iterate over segments for concatenation later on
+    DvAssert(nb_segments > 0);
+
+    // do line search to find which segments contain our stuff
+    // TODO optimize it tho.
+    // wait yeah this is more efficient done all at once i think
+    // because of sorted property.
+
+    return;
+
+    auto work_list_copy = work_list;
+
+    ServerData data{.orig_work_size = (uint32_t)work_list.size(),
+                    .chunks_done = 0,
+                    .work_list = std::move(work_list),
+                    .work_list_mutex = {}};
+
+    printf("Starting server...\n");
+    asio::io_context io_context(1);
+
+    // this always counts as work to the io_context. If this is not
+    // present, then .run() will automatically stop on its own
+    // if we remove the socket waiting code.
+    asio::signal_set signals(io_context, SIGINT, SIGTERM);
+    signals.async_wait([&](auto, auto) {
+        // TODO: would be nice to have graceful shutdown
+        // like we keep track of how many ctrl Cs.
+        // first one stops sending new chunks,
+        // second one hard shuts. something like that.
+        io_context.stop();
+
+        exit(EXIT_FAILURE);
+    });
+
+    std::thread server_stopper(&server_stopper_thread, std::ref(io_context),
+                               std::ref(data));
+
+    co_spawn(io_context, run_server(io_context, from_file, data), detached);
+
+    // I think it will block the thread.
+    // yeah so this needs to be done on another thread...
+
+    // TODO ensure this is optimized with the constructors and
+    // everything
+
+    // TODO maybe only pass the relevant data here
+    // just hope that doesn't involve any extra copying
+
+    // all the co_spawns are safe I think because everything terminates
+    // at the end of this function
+
+    // maybe I could just create another async task to check for
+    // completion of tasks. That uses condition variable or something.
+
+    io_context.run();
+
+    server_stopper.join();
+
+    printf("Concatenating video segments...\n");
+    DvAssert(concat_segments_iterable(
+                 [&]<typename F>(F use_func) {
+                     fmt_buf buf;
+                     fmt_buf buf2;
+                     for (auto& x : work_list_copy) {
+                         // TODO as an optimization I could reuse the same
+                         // buffer technically.
+                         x.fmt_name(buf.data());
+                         (void)snprintf(buf2.data(), buf2.size(),
+                                        "recv_client_%s", buf.data());
+                         use_func(buf2.data());
+                     }
+                 },
+                 "FINAL_OUTPUT.mp4") == 0);
+}
+
 int main(int argc, char* argv[]) {
     if (argc < 2) {
         printf("DiViEn: must specify at least 2 args.\n");
         return -1;
     }
+
+    struct sigaction sigIntHandler {};
+
+    sigIntHandler.sa_handler = my_handler;
+    sigemptyset(&sigIntHandler.sa_mask);
+    sigIntHandler.sa_flags = 0;
+
+    sigaction(SIGINT, &sigIntHandler, nullptr);
 
     av_log_set_callback(avlog_do_nothing);
 
@@ -1201,63 +1453,13 @@ int main(int argc, char* argv[]) {
     try {
 
         if (mode == "server") {
-            // now we need to feed each client chunks that are not done only
-            // we could do this via a global mutex and vector...
-            // well...
-            // you can't just have a global chunk index because it's
-            // not necessarily (and most likely won't) complete in
-            // linear order.
-            // const char* from_file = "/home/yusuf/avdist/OUTPUT0.mp4";
-            const char* from_file = "/home/yusuf/avdist/test_x265.mp4";
-            printf("Preparing and segmenting video file '%s'...\n", from_file);
+            if (argc < 3) {
+                printf(
+                    "DiViEn: must specify the input video for server mode.\n");
+                return -1;
+            }
 
-            unsigned int nb_segments = 0;
-            auto work_list = server_prepare_work(from_file, nb_segments);
-            DvAssert(nb_segments > 0);
-
-            ServerData data{.orig_work_size = (uint32_t)work_list.size(),
-                            .chunks_done = 0,
-                            .work_list = std::move(work_list),
-                            .work_list_mutex = {}};
-
-            printf("Starting server...\n");
-            asio::io_context io_context(1);
-
-            // this always counts as work to the io_context. If this is not
-            // present, then .run() will automatically stop on its own
-            // if we remove the socket waiting code.
-            asio::signal_set signals(io_context, SIGINT, SIGTERM);
-            signals.async_wait([&](auto, auto) {
-                io_context.stop();
-
-                exit(EXIT_FAILURE);
-            });
-
-            std::thread server_stopper(&server_stopper_thread,
-                                       std::ref(io_context), std::ref(data));
-
-            co_spawn(io_context, run_server(io_context, from_file, data),
-                     detached);
-
-            // I think it will block the thread.
-            // yeah so this needs to be done on another thread...
-
-            // TODO ensure this is optimized with the constructors and
-            // everything
-
-            // TODO maybe only pass the relevant data here
-            // just hope that doesn't involve any extra copying
-
-            // all the co_spawns are safe I think because everything terminates
-            // at the end of this function
-
-            // maybe I could just create another async task to check for
-            // completion of tasks. That uses condition variable or something.
-
-            io_context.run();
-
-            server_stopper.join();
-
+            run_server_full(argv[2]);
         } else if (mode == "client") {
 
             // TODO deduplicate code, as it's exact same between client and
@@ -1272,6 +1474,8 @@ int main(int argc, char* argv[]) {
             signals.async_wait([&](auto, auto) {
                 io_context.stop();
 
+                // TODO access exit function safely if possible
+                // not sure how thread safe this is
                 exit(EXIT_FAILURE);
             });
 

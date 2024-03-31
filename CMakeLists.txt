@@ -7,8 +7,8 @@ project(DiViEn)
 
 # set(CMAKE_CXX_STANDARD 26)
 set(CMAKE_CXX_STANDARD 23)
-set(CMAKE_BUILD_TYPE Debug)
-# set(CMAKE_BUILD_TYPE Release)
+# set(CMAKE_BUILD_TYPE Debug)
+set(CMAKE_BUILD_TYPE Release)
 set(CMAKE_EXPORT_COMPILE_COMMANDS TRUE)
 
 # set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
@@ -17,8 +17,8 @@ set(CMAKE_COLOR_DIAGNOSTICS ON)
 
 
 # apparently the leak detection has to do with -fno-omit-frame-pointer in libavcodec.
-add_compile_options(-fsanitize=address -fsanitize=undefined -fno-omit-frame-pointer)
-add_link_options(-fsanitize=address -fsanitize=undefined -fno-omit-frame-pointer)
+# add_compile_options(-fsanitize=address -fsanitize=undefined -fno-omit-frame-pointer)
+# add_link_options(-fsanitize=address -fsanitize=undefined -fno-omit-frame-pointer)
 
 # required for no dependencies on Windows (other than ffmpeg shared libs)
 

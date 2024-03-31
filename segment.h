@@ -150,7 +150,6 @@ constexpr size_t EST_PKTS_PER_SEG = 140;
 template <typename F, typename G>
 inline void iter_segs(F output_i, G output_range, uint32_t nb_segments,
                       std::span<ConcatRange> segs) {
-    // https://godbolt.org/z/TYj4hhjMr
     uint32_t i = 0;
     for (const auto& r : segs) {
         while (i < r.low) {
@@ -194,15 +193,23 @@ inline void iter_segfiles(F use_file, uint32_t nb_segments,
         nb_segments, segs);
 }
 
+struct SegmentResult {
+    std::vector<ConcatRange> concat_ranges{};
+    std::vector<uint32_t> packet_offsets{};
+};
+
 // TODO clean up this API. It's a mess currently.
 // segment video, including fixes to broken segments.
 // also TODO error handling
-[[nodiscard]] inline std::vector<ConcatRange>
+// [[nodiscard]] inline std::vector<ConcatRange>
+[[nodiscard]] inline SegmentResult
 segment_video_fully(const char* url, unsigned int& nb_segments) {
     // TODO is there ANY way to optimize this allocation?
     // Do we really need FULLY RANDOM access?
     // Can we "reset" the buffer after a concatenation has been made or
     // something?
+    SegmentResult res{};
+
     std::vector<Timestamp> timestamps{};
     timestamps.reserve(EST_NB_SEGMENTS * EST_PKTS_PER_SEG);
     // It would be nice to have both vectors somehow be a part of the same
@@ -212,13 +219,14 @@ segment_video_fully(const char* url, unsigned int& nb_segments) {
     printf("%zu - tss size (should be same as total packets)\n",
            timestamps.size());
 
-    std::vector<uint32_t> packet_offsets{};
-    packet_offsets.reserve(EST_NB_SEGMENTS);
+    res.packet_offsets.reserve(EST_NB_SEGMENTS);
 
     // TODO: remove extra debugging checks for frames,
     // or make it optional or something (eventually).
 
-    auto segs = fix_broken_segments(nb_segments, packet_offsets, timestamps);
+    // TODO make sure no extra copies happen here
+    res.concat_ranges =
+        fix_broken_segments(nb_segments, res.packet_offsets, timestamps);
 
-    return segs;
+    return res;
 }

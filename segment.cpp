@@ -24,13 +24,17 @@
 // in the future
 //
 
+// the size of the packet_offsets is not equal to the
+// total number of segments, because we add one extra
+// element at the end to give you the total size of
+// all packets
 std::vector<ConcatRange>
 fix_broken_segments(unsigned int num_segments,
                     std::vector<uint32_t>& packet_offsets,
                     std::span<Timestamp> timestamps) {
 
     std::vector<ConcatRange> fixed_segs{};
-    fixed_segs.reserve(num_segments / 8 + 1);
+    fixed_segs.reserve(num_segments / 8 + 8);
 
     auto concat_files = [&packet_offsets, timestamps,
                          &fixed_segs](unsigned int low, unsigned int high) {
@@ -128,9 +132,10 @@ fix_broken_segments(unsigned int num_segments,
         framesum += frames.frame_count;
     }
 
-    // Clang split loop?
+    // pushes final frame count
+    packet_offsets.push_back(p_offset);
 
-    // loop end reached
+    // split loop?
 
     printf("Framesum: %d\nTotal packets: %d\n", framesum,
            framesum + nb_discarded);
