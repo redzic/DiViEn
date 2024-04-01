@@ -223,6 +223,7 @@ segment_video_fully(const char* url, unsigned int& nb_segments) {
     timestamps.reserve(EST_NB_SEGMENTS * EST_PKTS_PER_SEG);
     // It would be nice to have both vectors somehow be a part of the same
     // larger allocation.
+    printf("Segmenting video...\n");
     DvAssert(segment_video(url, "OUTPUT%d.mp4", nb_segments, timestamps) == 0);
 
     printf("%zu - tss size (should be same as total packets)\n",

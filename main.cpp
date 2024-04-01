@@ -155,8 +155,8 @@ struct EncodeLoopState {
 // If pkt is refcounted, we shouldn't have to copy any data.
 // But the encoder may or may not create a reference.
 // I think it probably does? Idk.
-int encode(AVCodecContext* enc_ctx, AVFrame* frame, AVPacket* pkt,
-           FILE* ostream) {
+int encode_frame(AVCodecContext* enc_ctx, AVFrame* frame, AVPacket* pkt,
+                 FILE* ostream) {
     // frame can be null, which is considered a flush frame
     int ret = avcodec_send_frame(enc_ctx, frame);
     if (ret < 0) {
@@ -227,52 +227,66 @@ AVPixelFormat av_pix_fmt_supported_version(AVPixelFormat pix_fmt) {
 
 // TODO see if it's possible to reuse an encoder
 // by calling avcodec_open2 again.
+
+// we need to make a version of this that doesn't just encode everything and
+// flush the output at once
+
+struct EncoderContext {
+    AVCodecContext* avcc{nullptr};
+    AVPacket* pkt{nullptr};
+
+    EncoderContext() = default;
+    EncoderContext(EncoderContext&) = delete;
+    EncoderContext(EncoderContext&&) = delete;
+    EncoderContext& operator=(const EncoderContext&) = delete;
+    EncoderContext& operator=(const EncoderContext&&) = delete;
+
+    // TODO proper error handling, return std::expected
+    // caller needs to ensure they only call this once
+    void initialize_codec(AVFrame* frame) {
+        // const auto* codec = avcodec_find_encoder_by_name("libaom-av1");
+        const auto* codec = avcodec_find_encoder_by_name("libx264");
+        avcc = avcodec_alloc_context3(codec);
+        DvAssert(avcc);
+        pkt = av_packet_alloc();
+        DvAssert(pkt);
+        avcc->thread_count = THREADS_PER_WORKER;
+        // arbitrary values
+        avcc->time_base = (AVRational){1, 25};
+        avcc->framerate = (AVRational){25, 1};
+
+        avcc->width = frame->width;
+        avcc->height = frame->height;
+        avcc->pix_fmt =
+            av_pix_fmt_supported_version((AVPixelFormat)frame->format);
+
+        // X264/5:
+        av_opt_set(avcc->priv_data, "crf", "30", 0);
+        av_opt_set(avcc->priv_data, "preset", "ultrafast", 0);
+        // AOM:
+        // av_opt_set(avcc->priv_data, "cpu-used", "6", 0);
+        // av_opt_set(avcc->priv_data, "end-usage", "q", 0);
+        // av_opt_set(avcc->priv_data, "cq-level", "30", 0);
+        // av_opt_set(avcc->priv_data, "enable-qm", "1", 0);
+
+        int ret = avcodec_open2(avcc, codec, nullptr);
+        DvAssert(ret == 0 && "Failed to open encoder codec");
+    }
+
+    // TODO move encoding functions to this struct
+
+    ~EncoderContext() {
+        avcodec_free_context(&avcc);
+        av_packet_free(&pkt);
+    }
+};
+
 int encode_frames(const char* file_name, std::span<AVFrame*> frame_buffer,
                   EncodeLoopState& state) {
     DvAssert(!frame_buffer.empty());
 
-    // TODO is it possible to reuse encoder instances?
-    // const auto* codec = avcodec_find_encoder_by_name("libx264");
-    // const auto* codec = avcodec_find_encoder_by_name("libx265");
-    const auto* codec = avcodec_find_encoder_by_name("libx264");
-    // so avcodeccontext is used for both encoding and decoding...
-    // TODO make this its own class
-    auto* avcc = avcodec_alloc_context3(codec);
-    avcc->thread_count = THREADS_PER_WORKER;
-
-    if (avcc == nullptr) {
-        w_err("failed to allocate encoder context\n");
-        return -1;
-    }
-
-    auto pkt = make_resource<AVPacket, av_packet_alloc, av_packet_free>();
-
-    avcc->width = frame_buffer[0]->width;
-    avcc->height = frame_buffer[0]->height;
-    avcc->time_base = (AVRational){1, 25};
-    avcc->framerate = (AVRational){25, 1};
-
-    avcc->pix_fmt =
-        av_pix_fmt_supported_version((AVPixelFormat)frame_buffer[0]->format);
-
-    // X264/5:
-    av_opt_set(avcc->priv_data, "crf", "25", 0);
-    av_opt_set(avcc->priv_data, "preset", "ultrafast", 0);
-    // av_opt_set(avcc->priv_data, "preset", "veryfast", 0);
-    // AOM:
-    // av_opt_set(avcc->priv_data, "cpu-used", "6", 0);
-    // av_opt_set(avcc->priv_data, "end-usage", "q", 0);
-    // av_opt_set(avcc->priv_data, "cq-level", "30", 0);
-    // av_opt_set(avcc->priv_data, "enable-qm", "1", 0);
-
-    // RAV1E:
-    // av_opt_set(avcc->priv_data, "speed", "7", 0);
-
-    int ret = avcodec_open2(avcc, codec, nullptr);
-    if (ret < 0) {
-        w_err("failed to open codec\n");
-        return ret;
-    }
+    EncoderContext encoder;
+    encoder.initialize_codec(frame_buffer[0]);
 
     // C-style IO is needed for binary size to not explode on Windows with
     // static linking
@@ -283,14 +297,11 @@ int encode_frames(const char* file_name, std::span<AVFrame*> frame_buffer,
     for (auto* frame : frame_buffer) {
         // required
         frame->pict_type = AV_PICTURE_TYPE_NONE;
-        encode(avcc, frame, pkt.get(), file.get());
-        // actually nvm I'm not sure why this data seems wrong.
+        encode_frame(encoder.avcc, frame, encoder.pkt, file.get());
         state.nb_frames_done++;
     }
-    // need to send flush packet
-    encode(avcc, nullptr, pkt.get(), file.get());
-
-    avcodec_free_context(&avcc);
+    // need to send flush packet after we're done
+    encode_frame(encoder.avcc, nullptr, encoder.pkt, file.get());
 
     return 0;
 }
@@ -303,6 +314,107 @@ int encode_chunk(unsigned int chunk_idx, std::span<AVFrame*> framebuf,
     (void)snprintf(buf.data(), buf.size(), "file %d.mp4", chunk_idx);
 
     return encode_frames(buf.data(), framebuf, state);
+}
+
+struct FrameAccurateWorkItem {
+    // source chunk indexes (inclusive)
+    uint32_t low_idx;
+    uint32_t high_idx;
+    // number of frames to skip at the beginning
+    uint32_t nskip;
+    // number of frames to decode after skipping
+    uint32_t ndecode;
+
+    template <size_t N> void fmt(std::array<char, N>& arr) {
+        (void)snprintf(arr.data(), arr.size(), "[%d, %d], nskip %d, ndecode %d",
+                       low_idx, high_idx, nskip, ndecode);
+    }
+};
+
+// runs single threaded mode
+void encode_frame_range(FrameAccurateWorkItem& data, const char* fname) {
+    // TODO clean up string formatting, move it all to one centralized place
+    // format is
+    // "client_input_{idx}.mp4"
+
+    // we only skip frames on the first chunk, otherwise it wouldn't
+    // make any sense. All chunks have frames we need to decode.
+    EncoderContext encoder;
+    // now we have to encode exactly ndecode frames
+    auto nleft = data.ndecode;
+
+    make_file(efptr, fname, "wb");
+
+    bool enc_was_init = false;
+    uint32_t nframes_done = 0;
+
+    printf("frame= 0\n");
+
+    for (uint32_t idx = data.low_idx; idx <= data.high_idx; idx++) {
+        fmt_buf input_fname;
+        (void)snprintf(input_fname.data(), input_fname.size(),
+                       "client_input_%d.mp4", idx);
+        auto dres = DecodeContext::open(input_fname.data());
+
+        // perhaps we could initialize all these decoders at the same time...
+        // to save time.
+
+        std::visit(
+            [&](auto&& dc) {
+                using T = std::decay_t<decltype(dc)>;
+
+                if constexpr (std::is_same_v<T, DecodeContext>) {
+                    // main_encode_loop("output.mp4", arg);
+                    int nb_decoded = 0;
+                    // do we need to... uh...
+
+                    // TODO split loop if possible
+                    if (idx == data.low_idx) {
+                        // means we first need to decode nskip frames
+                        if (data.nskip > 0) {
+                            DvAssert(run_decoder(dc, 0, 1) == 1);
+                            encoder.initialize_codec(dc.framebuf[0]);
+                            enc_was_init = true;
+                            for (auto nf = data.nskip - 1; nf != 0; nf--) {
+                                DvAssert(run_decoder(dc, 0, 1) == 1);
+                            }
+                        }
+                    }
+
+                    // TODO allow configurable frame size when constructing
+                    // decoder, to avoid wasting memory
+                    while (nleft > 0 &&
+                           (nb_decoded = run_decoder(dc, 0, nleft)) > 0) {
+                        if (!enc_was_init) [[unlikely]] {
+                            encoder.initialize_codec(dc.framebuf[0]);
+                            enc_was_init = true;
+                        }
+
+                        DvAssert(nb_decoded > 0);
+                        nleft -= nb_decoded;
+
+                        std::span<AVFrame*> frame_range(dc.framebuf.data(),
+                                                        nb_decoded);
+
+                        for (auto* frame : frame_range) {
+                            // required
+                            frame->pict_type = AV_PICTURE_TYPE_NONE;
+                            encode_frame(encoder.avcc, frame, encoder.pkt,
+                                         efptr.get());
+                            printf(ERASE_LINE_ANSI "frame= %u\n",
+                                   ++nframes_done);
+                            // state.nb_frames_done++;
+                        }
+                    }
+                } else {
+                    printf("Decoder failed to open for input file '%s'\n",
+                           input_fname.data());
+                }
+            },
+            dres);
+    }
+
+    encode_frame(encoder.avcc, nullptr, encoder.pkt, efptr.get());
 }
 
 // framebuf is start of frame buffer that worker can use
@@ -776,21 +888,6 @@ template <typename Functor> awaitable<size_t> print_transfer_speed(Functor f) {
     print_transfer_speed(                                                      \
         [&]() -> awaitable<size_t> { co_return co_await (arguments); })
 
-struct FrameAccurateWorkItem {
-    // source chunk indexes (inclusive)
-    uint32_t low_idx;
-    uint32_t high_idx;
-    // number of frames to skip at the beginning
-    uint32_t nskip;
-    // number of frames to decode after skipping
-    uint32_t ndecode;
-
-    template <size_t N> void fmt(std::array<char, N>& arr) {
-        (void)snprintf(arr.data(), arr.size(), "[%d, %d], nskip %d, ndecode %d",
-                       low_idx, high_idx, nskip, ndecode);
-    }
-};
-
 // TODO come up with a better name for this function and the write version
 // This is just an ugly name man.
 // Returns number of bytes received
@@ -1097,6 +1194,7 @@ void server_stopper_thread(asio::io_context& context, ServerData& data) {
 
 // god this code is messy
 // TODO return nb_segments as value (and all similar functions in code)
+// sadly there's some kind of bug with segmenting that huge video.
 FinalWorklist server_prepare_work(const char* source_file,
                                   unsigned int& nb_segments) {
     unsigned int n_segments = 0;
@@ -1114,7 +1212,7 @@ FinalWorklist server_prepare_work(const char* source_file,
     // ideally we should use another type for this because these are actually
     // frame indexes not something else.
     std::vector<FixedSegment> scene_splits{};
-    constexpr uint32_t SPLIT_SIZE = 60;
+    constexpr uint32_t SPLIT_SIZE = 250;
     for (uint32_t i = 0; i < sg.packet_offsets.back(); i += SPLIT_SIZE) {
         scene_splits.emplace_back(
             i, std::min(i + SPLIT_SIZE - 1, sg.packet_offsets.back() - 1));
@@ -1377,7 +1475,6 @@ awaitable<void> run_client(asio::io_context& io_context, tcp_socket socket,
     // TODO fix gcc warnings.
 
     // where to dump the input file from the server
-    fmt_buf output_buf;
     fmt_buf input_buf;
     for (;;) { //    change of protocol.
         // All subsequent headers are for the actual file data.
@@ -1451,18 +1548,27 @@ awaitable<void> run_client(asio::io_context& io_context, tcp_socket socket,
         // co_await DISPLAY_SPEED(
         //     socket_send_file(socket, output_buf.data(), error));
 
-        // send filler data
-        uint32_t todo_delete = 4;
-        co_await asio::async_write(socket, asio::buffer(&todo_delete, 4),
-                                   use_awaitable);
-        co_await asio::async_write(socket, asio::buffer(&todo_delete, 4),
-                                   use_awaitable);
-        todo_delete = 0;
-        co_await asio::async_write(socket, asio::buffer(&todo_delete, 4),
-                                   use_awaitable);
+        fmt_buf output_buf;
+        (void)snprintf(output_buf.data(), output_buf.size(), "enc_%u%u%u%u.mp4",
+                       work.low_idx, work.high_idx, work.nskip, work.ndecode);
 
-        printf("Uploaded junk data to server\n");
-        // printf("Uploaded %s to server\n", output_buf.data());
+        encode_frame_range(work, output_buf.data());
+
+        co_await DISPLAY_SPEED(
+            socket_send_file(socket, output_buf.data(), error));
+
+        // // send filler/junk data
+        // uint32_t todo_delete = 4;
+        // co_await asio::async_write(socket, asio::buffer(&todo_delete, 4),
+        //                            use_awaitable);
+        // co_await asio::async_write(socket, asio::buffer(&todo_delete, 4),
+        //                            use_awaitable);
+        // todo_delete = 0;
+        // // write "null terminator"
+        // co_await asio::async_write(socket, asio::buffer(&todo_delete, 4),
+        //                            use_awaitable);
+
+        printf("Uploaded %s to server\n", output_buf.data());
     }
     co_return;
 }
@@ -1809,12 +1915,6 @@ int main_unused(int argc, char* argv[]) {
 
             if constexpr (std::is_same_v<T, DecodeContext>) {
                 main_encode_loop("output.mp4", arg);
-
-                // int frames = decode_loop(arg);
-                // printf("decoded %d frames\n", frames);
-
-                // DvAssert(run_decoder(arg, 0, 60) == 60);
-                // printf("initial decode of 60 frames succeeded\n");
 
             } else if constexpr (std::is_same_v<T, DecoderCreationError>) {
                 auto error = arg;

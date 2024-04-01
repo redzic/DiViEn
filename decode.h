@@ -68,7 +68,7 @@ struct DemuxerContext {
 
     // is there a faster way to delete this constructors?
     DemuxerContext() = delete;
-    DemuxerContext(DemuxerContext&& source) = delete;
+    DemuxerContext(DemuxerContext&&) = delete;
     DemuxerContext(DemuxerContext&) = delete;
     DemuxerContext& operator=(const DemuxerContext&) = delete;
     DemuxerContext& operator=(const DemuxerContext&&) = delete;

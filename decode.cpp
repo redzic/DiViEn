@@ -105,6 +105,11 @@ DecodeContext::open(const char* url) {
         stream_idx};
 }
 
+// TODO use some kind of custom struct or whatever that forces you to check the
+// error.
+//
+// Returns number of frames successfully decoded, or a negative number on
+// error.
 int run_decoder(DecodeContext& dc, size_t framebuf_offset, size_t max_frames) {
     // TODO could possibly add a check/method in DecodeContext to ensure
     // it's initialized fully before use.
