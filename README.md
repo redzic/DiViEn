@@ -40,3 +40,4 @@ TODO:
     check one single time in mpv and it "seems to have worked".
 
   - make sure windows builds are compiled with clang.
+  - and use custom optimized memcpy/memchr,malloc (mimalloc perhaps, or NUMAlloc )

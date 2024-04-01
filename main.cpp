@@ -1,17 +1,19 @@
 // gonna have to obviously disable on some configurations and whatever
-#include "concat.h"
+#include <unordered_set>
 #define ASIO_HAS_IO_URING 1
 #define ASIO_DISABLE_EPOLL 1
 
 // pagecache + bypassing cache?
 
-#include <asio/detail/reactor.hpp>
+// #include <asio/detail/reactor.hpp>
 
 #include <asio.hpp>
+#include <asio/buffer.hpp>
 #include <asio/co_spawn.hpp>
 #include <asio/detached.hpp>
 #include <asio/io_context.hpp>
 #include <asio/ip/tcp.hpp>
+#include <asio/read.hpp>
 #include <asio/signal_set.hpp>
 #include <asio/socket_base.hpp>
 #include <asio/use_awaitable.hpp>
@@ -230,9 +232,9 @@ int encode_frames(const char* file_name, std::span<AVFrame*> frame_buffer,
     DvAssert(!frame_buffer.empty());
 
     // TODO is it possible to reuse encoder instances?
-    const auto* codec = avcodec_find_encoder_by_name("libx264");
+    // const auto* codec = avcodec_find_encoder_by_name("libx264");
     // const auto* codec = avcodec_find_encoder_by_name("libx265");
-    // const auto* codec = avcodec_find_encoder_by_name("libaom-av1");
+    const auto* codec = avcodec_find_encoder_by_name("libx264");
     // so avcodeccontext is used for both encoding and decoding...
     // TODO make this its own class
     auto* avcc = avcodec_alloc_context3(codec);
@@ -527,8 +529,8 @@ void main_encode_loop(const char* out_filename, DecodeContext& d_ctx) {
         // print progress
         // TODO I guess this should detect if we are outputting to a
         // terminal/pipe and don't print ERASE_LINE_ASCII if not a tty.
-        printf(ERASE_LINE_ANSI "frame= %d  (%s fps curr, %s fps avg)\n",
-               n_frames, local_fps_fmt.data(), avg_fps_fmt.data());
+        printf(ERASE_LINE_ANSI "frame= %d  (%s fps avg, %s fps curr)\n",
+               n_frames, avg_fps_fmt.data(), local_fps_fmt.data());
 
         static_assert(NUM_WORKERS >= 1);
 
@@ -692,13 +694,17 @@ constexpr size_t TCP_BUFFER_SIZE = 2048z * 32 * 4; // 256 Kb buffer
 
 // Returns number of bytes read.
 // TODO make async.
-[[nodiscard]] awaitable<size_t> socket_write_all_from_file(
-    tcp_socket& socket, const char* filename,
-    asio::error_code& error) { // Open a file in read mode
+[[nodiscard]] awaitable<size_t>
+socket_send_file(tcp_socket& socket, const char* filename,
+                 asio::error_code& error) { // Open a file in read mode
 
-    printf("Called socket_write_all_from_file\n");
+    printf("Called socket_send_file\n");
 
     make_file(fptr, filename, "rb");
+    if (!filename) {
+        printf("Opening file %s failed\n", filename);
+    }
+    DvAssert(fptr.get());
 
     std::array<uint8_t, TCP_BUFFER_SIZE> read_buf;
     uint32_t header = 0;
@@ -770,16 +776,28 @@ template <typename Functor> awaitable<size_t> print_transfer_speed(Functor f) {
     print_transfer_speed(                                                      \
         [&]() -> awaitable<size_t> { co_return co_await (arguments); })
 
-// TODO instead of taking string argument, perhaps I should take
-// a reference to a fixed size array and use snprintf.
+struct FrameAccurateWorkItem {
+    // source chunk indexes (inclusive)
+    uint32_t low_idx;
+    uint32_t high_idx;
+    // number of frames to skip at the beginning
+    uint32_t nskip;
+    // number of frames to decode after skipping
+    uint32_t ndecode;
+
+    template <size_t N> void fmt(std::array<char, N>& arr) {
+        (void)snprintf(arr.data(), arr.size(), "[%d, %d], nskip %d, ndecode %d",
+                       low_idx, high_idx, nskip, ndecode);
+    }
+};
 
 // TODO come up with a better name for this function and the write version
 // This is just an ugly name man.
 // Returns number of bytes received
-[[nodiscard]] awaitable<size_t>
-socket_read_all_to_file(tcp_socket& socket, const char* dumpfile,
-                        asio::error_code& error) {
-    printf("Called socket_read_all_to_file\n");
+[[nodiscard]] awaitable<size_t> socket_recv_file(tcp_socket& socket,
+                                                 const char* dumpfile,
+                                                 asio::error_code& error) {
+    printf("Called socket_recv_file\n");
 
     // TODO ideally we don't create any file unless we at least read the header
     // or something. I think that wouldn't even be hard to do actually.
@@ -814,8 +832,8 @@ socket_read_all_to_file(tcp_socket& socket, const char* dumpfile,
         }
 
         if (header == 0) {
-            printf("header was 0 (means end of data stream according to "
-                   "protocol).\n");
+            // printf("header was 0 (means end of data stream according to "
+            //        "protocol).\n");
             break;
         }
         DvAssert(nread == 4);
@@ -865,10 +883,32 @@ socket_read_all_to_file(tcp_socket& socket, const char* dumpfile,
 // Or perhaps we can only signal if the total chunks done equals the
 
 // owned data
+
+// TODO
+// if we allow client sending error messages back,
+// limit the maximum size we receive.
+
+// TODO: when decoding skipped frames,
+// put them all in the same avframe.
+
+// for distributed encoding, including fixed segments,
+// arbitrary file access
+// TODO need to deduplicate this code and instead of using
+// 0 as special value for high_idx, just store the same
+// index as low_idx. It would simplify code a good amount.
+
+struct FinalWorklist {
+    // This is supposed to be a list of actual original segments
+    // Which could either be an individual segment or a concatenated one.
+    std::vector<FixedSegment> source_chunks;
+    // selects low and high indexes of source_chunks
+    std::vector<FrameAccurateWorkItem> client_chunks;
+};
+
 struct ServerData {
     uint32_t orig_work_size;
     std::atomic<uint32_t> chunks_done;
-    std::vector<Segment> work_list;
+    FinalWorklist work;
     std::mutex work_list_mutex;
 
     // for thread killing
@@ -882,95 +922,148 @@ struct ServerData {
                                           tcp_socket socket,
                                           unsigned int conn_num,
                                           ServerData& state) {
-    printf("Entered handle_client\n");
-    // so we need to signal to the main thread that we are uh
-    // waiting and shit.
+    try {
 
-    // So it's actually quite simple.
-    // Instead of sending all chunks, we send chunks from a queue.
-    // That's basically it.
-    // There's also a possibility that we add stuff back to the queue.
-    // I mean tbf we can do that with mpsc as well.
-    // TODO Mutex<Vector> is probably not the most efficient approach.
-    // Maybe we should actually use a linked list or something.
-    // Find something better if possible.
+        printf("Entered handle_conn\n");
+        // so we need to signal to the main thread that we are uh
+        // waiting and shit.
 
-    asio::error_code error;
+        // So it's actually quite simple.
+        // Instead of sending all chunks, we send chunks from a queue.
+        // That's basically it.
+        // There's also a possibility that we add stuff back to the queue.
+        // I mean tbf we can do that with mpsc as well.
+        // TODO Mutex<Vector> is probably not the most efficient approach.
+        // Maybe we should actually use a linked list or something.
+        // Find something better if possible.
 
-    // bro so much stuff needs to be refactored for this
-    // the output names are all mumbo jumboed
+        asio::error_code error;
 
-    for (;;) {
-        fmt_buf fname;
-        {
-            std::lock_guard<std::mutex> guard(state.work_list_mutex);
-            // we can now safely access the work list
+        // bro so much stuff needs to be refactored for this
+        // the output names are all mumbo jumboed
 
-            // no more work left
-            if (state.work_list.empty()) {
+        for (;;) {
+            FrameAccurateWorkItem work{};
+            {
+                std::lock_guard<std::mutex> guard(state.work_list_mutex);
+                // we can now safely access the work list
 
-                printf("No more work left\n");
-                // Just because the work list is empty doesn't mean
-                // the work has been completed. It just means
-                // it's been ALLOCATED (distributed).
-                // And we really shouldn't use context.stop() either...
-                // so I think socket only shuts down the current one
-                // socket.shutdown(asio::socket_base::shutdown_receive);
-                // yeah we can't just do this..
-                // we would have to make sure ALL OTHER
-                // clients are stopped too...
-                // context.stop();
-                co_return;
+                // no more work left
+                if (state.work.client_chunks.empty()) {
+
+                    printf("No more work left\n");
+                    // Just because the work list is empty doesn't mean
+                    // the work has been completed. It just means
+                    // it's been ALLOCATED (distributed).
+                    // And we really shouldn't use context.stop() either...
+                    // so I think socket only shuts down the current one
+                    // socket.shutdown(asio::socket_base::shutdown_receive);
+                    // yeah we can't just do this..
+                    // we would have to make sure ALL OTHER
+                    // clients are stopped too...
+                    // context.stop();
+                    co_return;
+                }
+
+                // get some work to be done
+                work = state.work.client_chunks.back();
+
+                state.work.client_chunks.pop_back();
             }
 
-            // get some work to be done
-            auto elem = state.work_list.back();
-            elem.fmt_name(fname.data());
+            fmt_buf tmp;
+            work.fmt(tmp);
 
-            state.work_list.pop_back();
+            // we are just going to send each thing in order
+            // low, high, nskip, ndecode
+            co_await asio::async_write(socket, asio::buffer(&work.low_idx, 4),
+                                       use_awaitable);
+            co_await asio::async_write(socket, asio::buffer(&work.high_idx, 4),
+                                       use_awaitable);
+            co_await asio::async_write(socket, asio::buffer(&work.nskip, 4),
+                                       use_awaitable);
+            co_await asio::async_write(socket, asio::buffer(&work.ndecode, 4),
+                                       use_awaitable);
+
+            // now we wait for the client to tell us which chunks out of those
+            // it actually needs the format for that is 4 byte length, followed
+            // by vec of 4 byte segments. Each 4 bytes tells which index it
+            // needs.
+            // TODO for validate_worker or whatever, make sure client can only
+            // request chunks that we specified
+
+            DvAssert(work.low_idx <= work.high_idx);
+
+            fmt_buf fname;
+            for (uint32_t i = work.low_idx; i <= work.high_idx; i++) {
+                // client is supposed to tell us if it already has this chunk or
+                // not.
+
+                // just a yes or no
+                uint8_t client_already_has_chunk = 0;
+                co_await asio::async_read(
+                    socket, asio::buffer(&client_already_has_chunk, 1),
+                    use_awaitable);
+
+                if (client_already_has_chunk) {
+                    continue;
+                }
+
+                // this should never be modified so it should be ok to just
+                // access this without a mutex oh ok so here the problem is
+                // we are using data that is not meant to be used the way we
+                // are using it... I think the indexes are mismatched. But
+                // we do need to fix this.
+                printf(" --- INDEX %d\n", i);
+                // state.work.source_chunks.at(i).fmt(fname);
+                state.work.source_chunks.at(i).fmt(fname);
+
+                // we are uploading this
+                printf("Sending '%s' to client #%d\n", fname.data(), conn_num);
+                auto bytes1 =
+                    co_await socket_send_file(socket, fname.data(), error);
+                printf("Sent %zu bytes to client\n", bytes1);
+            }
+
+            // send multiple files, receive one encoded file
+
+            // TODO. It would be faster to transfer the encoded packets
+            // as they are complete, so we do stuff in parallel.
+            // Instead of waiting around for chunks to be entirely finished.
+            // I think we can even do this without changing the protocol.
+
+            // Receive back encoded data
+            // TODO the display on this is totally misleading
+            // because it takes into account the encoding time as well.
+            // Fixing this would require a redesign to the protocol I guess.
+
+            // TODO add verify work option or something, ensures packet count is
+            // what was expected. Or you could call it trust_workers or
+            // something. which is set to false by default. Or whatever.
+            fmt_buf recv_buf;
+            (void)snprintf(recv_buf.data(), recv_buf.size(),
+                           "recv_client_%u%u%u%u.mp4", work.low_idx,
+                           work.high_idx, work.ndecode, work.nskip);
+            auto bytes =
+                co_await socket_recv_file(socket, recv_buf.data(), error);
+            printf("Read back %zu bytes [from client #%d]\n", bytes, conn_num);
+
+            // here we receive encoded data
+            std::lock_guard<std::mutex> lk(state.tk_cv_m);
+            state.chunks_done++;
+            // not entirely sure if this lock is really necessary
+            state.tk_cv.notify_one();
         }
 
-        printf("Sending '%s' to client #%d\n", fname.data(), conn_num);
-        // Send payload to encode to client
-        // print_transfer_speed
-        auto bytes1 =
-            co_await socket_write_all_from_file(socket, fname.data(), error);
-        printf("Sent %zu bytes to client\n", bytes1);
+        // unfortunately this is the only real solution to this problem
+        // ITER_SEGFILES(co_await use_file, nb_segments, seg_result);
 
-        // TODO. It would be faster to transfer the encoded packets
-        // as they are complete, so we do stuff in parallel.
-        // Instead of waiting around for chunks to be entirely finished.
-        // I think we can even do this without changing the protocol.
-
-        // Receive back encoded data
-        // TODO the display on this is totally misleading
-        // because it takes into account the encoding time as well.
-        // Fixing this would require a redesign to the protocol I guess.
-
-        // TODO add verify work option or something, ensures packet count is
-        // what was expected. Or you could call it trust_workers or something.
-        // which is set to false by default. Or whatever.
-        fmt_buf recv_buf;
-        (void)snprintf(recv_buf.data(), recv_buf.size(), "recv_client_%s",
-                       fname.data());
-        auto bytes =
-            co_await socket_read_all_to_file(socket, recv_buf.data(), error);
-        printf("Read back %zu bytes [from client #%d]\n", bytes, conn_num);
-
-        // here we receive encoded data
-        printf("Attempting to retrieve lock guard...\n");
-        std::lock_guard<std::mutex> lk(state.tk_cv_m);
-        printf("Calling notify\n");
-        state.chunks_done++;
-        // not entirely sure if this lock is really necessary
-        state.tk_cv.notify_one();
+        // should never be reached.
+        co_return;
+    } catch (std::exception& e) {
+        // e.what()
+        printf("exception occurred in handle_conn(): %s\n", e.what());
     }
-
-    // unfortunately this is the only real solution to this problem
-    // ITER_SEGFILES(co_await use_file, nb_segments, seg_result);
-
-    // should never be reached.
-    // co_return;
 }
 
 // TODO do not use any_io_executor as it's the defualt polymorphic
@@ -1002,24 +1095,17 @@ void server_stopper_thread(asio::io_context& context, ServerData& data) {
     co_spawn(context, kill_context(context), detached);
 }
 
-// TODO
-// if we allow client sending error messages back,
-// limit the maximum size we receive.
-
-// TODO: when decoding skipped frames,
-// put them all in the same avframe.
-
 // god this code is messy
 // TODO return nb_segments as value (and all similar functions in code)
-std::vector<Segment> server_prepare_work(const char* source_file,
-                                         unsigned int& nb_segments) {
+FinalWorklist server_prepare_work(const char* source_file,
+                                  unsigned int& nb_segments) {
     unsigned int n_segments = 0;
     auto sg = segment_video_fully(source_file, n_segments);
     nb_segments = n_segments;
 
     DvAssert(!sg.packet_offsets.empty());
 
-    auto work_list = get_file_list(nb_segments, sg.concat_ranges);
+    auto fixed_chunks = get_file_list(nb_segments, sg.concat_ranges);
     // TODO optimize this. We don't have to recompute the packet amounts
     // (assuming the segmenting worked as expected)
 
@@ -1027,8 +1113,8 @@ std::vector<Segment> server_prepare_work(const char* source_file,
     // bruh this is so damn messy
     // ideally we should use another type for this because these are actually
     // frame indexes not something else.
-    std::vector<Segment> scene_splits{};
-    constexpr uint32_t SPLIT_SIZE = 250;
+    std::vector<FixedSegment> scene_splits{};
+    constexpr uint32_t SPLIT_SIZE = 60;
     for (uint32_t i = 0; i < sg.packet_offsets.back(); i += SPLIT_SIZE) {
         scene_splits.emplace_back(
             i, std::min(i + SPLIT_SIZE - 1, sg.packet_offsets.back() - 1));
@@ -1050,23 +1136,42 @@ std::vector<Segment> server_prepare_work(const char* source_file,
     // go back.
     // for now we are operating over original unconcatenated chunks.
     // But whatever...
+
+    // work list based on scene segments
+
+    std::vector<FrameAccurateWorkItem> work_items{};
+    work_items.reserve(scene_splits.size() + 32);
+
+    // TODO do this without copying the data over (in place)
+    // would iterating in reverse help with that?
+    std::vector<uint32_t> fixed_packet_offs{};
+    fixed_packet_offs.reserve(sg.packet_offsets.size());
+    iter_segs(
+        [&](uint32_t i) { fixed_packet_offs.push_back(sg.packet_offsets[i]); },
+        [&](ConcatRange r) {
+            DvAssert(r.high > r.low);
+            fixed_packet_offs.push_back(sg.packet_offsets[r.low]);
+        },
+        nb_segments, sg.concat_ranges);
+    fixed_packet_offs.push_back(sg.packet_offsets.back());
+
     auto print_chunk_i = [&](auto chunk_idx) {
         printf("  Chunk i=%zu [%d, %d]\n", chunk_idx,
-               sg.packet_offsets[chunk_idx],
-               sg.packet_offsets[chunk_idx + 1] - 1);
+               fixed_packet_offs[chunk_idx],
+               fixed_packet_offs[chunk_idx + 1] - 1);
     };
     auto chunki_maxidx = [&](auto chunk_idx) {
-        return sg.packet_offsets[chunk_idx + 1] - 1;
+        return fixed_packet_offs[chunk_idx + 1] - 1;
     };
 
-    auto overlap_exists = [&](auto chunk_idx, Segment scene) {
+    auto overlap_exists = [&](auto chunk_idx, FixedSegment scene) {
         auto is_overlapping = [](auto x1, auto x2, auto y1, auto y2) {
             auto res = std::max(x1, y1) <= std::min(x2, y2);
             // printf("OVERLAP ? %d [%d, %d], [%d, %d]\n", (int)res, x1, x2, y1,
             //        y2);
             return res;
         };
-        auto c_low_idx = sg.packet_offsets[chunk_idx];
+        auto c_low_idx = fixed_packet_offs[chunk_idx];
         auto c_high_idx = chunki_maxidx(chunk_idx);
         // printf("    [ci %zu] ", chunk_idx);
         return is_overlapping(c_low_idx, c_high_idx, scene.low, scene.high);
@@ -1074,6 +1179,9 @@ std::vector<Segment> server_prepare_work(const char* source_file,
 
     // chunk idx may or may not increment.
     // size_t chunk_idx = 0;
+    // yeah so the bug is here...
+    // we need to fix it
+    // and make a new packet offset
     for (auto scene : scene_splits) {
         // printf("[%d, %d] (ci %zu)\n", scene.low, scene.high, chunk_idx);
         printf("[%d, %d]\n", scene.low, scene.high);
@@ -1111,23 +1219,54 @@ std::vector<Segment> server_prepare_work(const char* source_file,
         //         printf("[ci = %zu] Should not happen\n", chunk_idx);
         //     }
 
+        // this is the "true" work list or whatever
+
+        uint32_t low_idx = 0;
+        uint32_t high_idx = 0;
         bool found_yet = false;
+        // uint32_t
         size_t decode_nskip = 0;
-        for (size_t i = 0; i < sg.packet_offsets.size() - 1; i++) {
+        for (size_t i = 0; i < fixed_packet_offs.size() - 1; i++) {
             if (overlap_exists(i, scene)) {
                 print_chunk_i(i);
                 if (!found_yet) {
                     // means this is the first chunk
-                    decode_nskip = scene.low - sg.packet_offsets[i];
+                    low_idx = i;
+                    decode_nskip = scene.low - fixed_packet_offs[i];
                 }
+                high_idx = i;
                 found_yet = true;
+            } else if (found_yet) {
+                break;
             }
         }
-        printf("   nskip = %zu, ndecode = %u\n", decode_nskip,
-               scene.high - scene.low + 1);
+        work_items.push_back(FrameAccurateWorkItem{
+            .low_idx = low_idx,
+            .high_idx = high_idx,
+            .nskip = (uint32_t)decode_nskip,
+            .ndecode = scene.high - scene.low + 1,
+        });
+        printf("   nskip = %zu, ndecode = %u - range [%d, %d]\n", decode_nskip,
+               scene.high - scene.low + 1, low_idx, high_idx);
     }
 
-    return work_list;
+    // TODO optimize moving and initialiation of vectors if possible
+    auto res = FinalWorklist{.source_chunks = std::move(fixed_chunks),
+                             .client_chunks = std::move(work_items)};
+
+    fmt_buf buf;
+    // for (auto x : res.source_chunks) {
+    //     x.fmt(buf);
+    //     printf("%s\n", buf.data());
+    // }
+    // yeah so client_chunks should be based on new data bruh.
+    // Not old one.
+    for (auto x : res.client_chunks) {
+        x.fmt(buf);
+        printf("%s\n", buf.data());
+    }
+
+    return res;
 }
 
 // TODO remove unused arguments
@@ -1139,7 +1278,8 @@ awaitable<void> run_server(asio::io_context& context, const char* source_file,
     tcp_acceptor acceptor(context, {tcp::v4(), 7878});
 
     printf("[Async] Listening for connections...\n");
-    for (unsigned int conn_num = 1; conn_num <= 3; conn_num++) {
+    // for (unsigned int conn_num = 1; conn_num <= 3; conn_num++) {
+    for (unsigned int conn_num = 1;; conn_num++) {
         // OH MY GOD. This counts as work for io_context!
         // So in theory we can remove the .stop() ont he context.
 
@@ -1202,8 +1342,11 @@ template <typename F> struct OnReturn {
 // TODO. Perhaps the client should run, because it might lower throughput.
 awaitable<void> run_client(asio::io_context& io_context, tcp_socket socket,
                            asio::error_code& error) {
-    // I really can't be bothered
     OnReturn io_context_stopper([&]() { io_context.stop(); });
+
+    // TODO perhaps use flat array, should be faster since wouldn't need any
+    // hashing.
+    std::unordered_set<uint32_t> stored_chunks{};
 
     printf("Connected to server\n");
 
@@ -1236,43 +1379,90 @@ awaitable<void> run_client(asio::io_context& io_context, tcp_socket socket,
     // where to dump the input file from the server
     fmt_buf output_buf;
     fmt_buf input_buf;
-    for (size_t work_idx = 0;; work_idx++) {
-        (void)snprintf(input_buf.data(), input_buf.size(),
-                       "client_input_%zu.mp4", work_idx);
-        //    change of protocol.
-        // First header is going to give you the filename.
+    for (;;) { //    change of protocol.
         // All subsequent headers are for the actual file data.
 
-        // Read payload from server.
-        // -nan mbps is coming from when this returns 0
-        size_t nwritten = co_await DISPLAY_SPEED(
-            socket_read_all_to_file(socket, input_buf.data(), error));
-        printf("Read %zu bytes from server\n", nwritten);
+        // read multiple payloads from server
+        FrameAccurateWorkItem work{};
 
-        if (error == asio::error::eof || nwritten == 0) {
-            printf("eof, exiting...\n");
-            break;
+        co_await asio::async_read(socket, asio::buffer(&work.low_idx, 4),
+                                  use_awaitable);
+        co_await asio::async_read(socket, asio::buffer(&work.high_idx, 4),
+                                  use_awaitable);
+        co_await asio::async_read(socket, asio::buffer(&work.nskip, 4),
+                                  use_awaitable);
+        co_await asio::async_read(socket, asio::buffer(&work.ndecode, 4),
+                                  use_awaitable);
+
+        DvAssert(work.low_idx <= work.high_idx);
+
+        // why does it only send one chunk at a time though?
+        // TODO add that mechanism of back and forth "do you already have this
+        // file" and then only send necessary chunks
+
+        fmt_buf tmp;
+        work.fmt(tmp);
+        printf(" header data: %s\n", tmp.data());
+
+        // change of plans
+        // server will ask for each chunk if it already has it
+        for (uint32_t chunk_idx = work.low_idx; chunk_idx <= work.high_idx;
+             chunk_idx++) {
+
+            uint8_t already_have =
+                static_cast<uint8_t>(stored_chunks.contains(chunk_idx));
+            co_await asio::async_write(socket, asio::buffer(&already_have, 1),
+                                       use_awaitable);
+            if (already_have) {
+                printf("Skipping recv of chunk %u (we already have it)\n",
+                       chunk_idx);
+                continue;
+            }
+
+            stored_chunks.insert(chunk_idx);
+
+            printf(" chunk_idx: %u\n", chunk_idx);
+
+            (void)snprintf(input_buf.data(), input_buf.size(),
+                           "client_input_%u.mp4", chunk_idx);
+
+            // receive work
+            size_t nwritten = co_await DISPLAY_SPEED(
+                socket_recv_file(socket, input_buf.data(), error));
+            printf("Read %zu bytes from server\n", nwritten);
         }
 
         // Once output has been received, encode it.
 
-        auto vdec = DecodeContext::open(input_buf.data());
+        // auto vdec = DecodeContext::open(input_buf.data());
         // this should take a parameter for output filename
         // TODO remove all the hardcoding.
         // const char* outf = "client_output.mp4";
-        (void)snprintf(output_buf.data(), output_buf.size(),
-                       "client_output_%zu.mp4", work_idx);
-        main_encode_loop(output_buf.data(), std::get<DecodeContext>(vdec));
+        // (void)snprintf(output_buf.data(), output_buf.size(),
+        //                "client_output_%zu.mp4", work_idx);
+        // main_encode_loop(output_buf.data(), std::get<DecodeContext>(vdec));
 
-        printf("Finished encoding '%s', output in : '%s'\n", input_buf.data(),
-               output_buf.data());
+        // printf("Finished encoding '%s', output in : '%s'\n",
+        // input_buf.data(),
+        //        output_buf.data());
 
         // Send the encoded result to the server.
         // need to check
-        co_await DISPLAY_SPEED(
-            socket_write_all_from_file(socket, output_buf.data(), error));
+        // co_await DISPLAY_SPEED(
+        //     socket_send_file(socket, output_buf.data(), error));
 
-        printf("Uploaded %s to server\n", output_buf.data());
+        // send filler data
+        uint32_t todo_delete = 4;
+        co_await asio::async_write(socket, asio::buffer(&todo_delete, 4),
+                                   use_awaitable);
+        co_await asio::async_write(socket, asio::buffer(&todo_delete, 4),
+                                   use_awaitable);
+        todo_delete = 0;
+        co_await asio::async_write(socket, asio::buffer(&todo_delete, 4),
+                                   use_awaitable);
+
+        printf("Uploaded junk data to server\n");
+        // printf("Uploaded %s to server\n", output_buf.data());
     }
     co_return;
 }
@@ -1296,6 +1486,13 @@ awaitable<void> run_client(asio::io_context& io_context, tcp_socket socket,
 // 21.23 s (divien) vs 29.16 s (av1an).
 
 // 40.38 s (divien) vs 60.02 s (av1an)
+
+// time ./target/release/av1an -y -i ~/avdist/test_x265.mp4 -e aom --
+// passes 1 --split-method none --concat mkvmerge --verbose --workers 4 -o
+// ni.mkv -x 60 -m lsmash --pix-forma t yuv420p
+
+// 464.14 s (av1an) - 8.96 fps
+// 340.91 s (divien) - 12.1 fps
 
 // ok so ffmpeg does actually store a refcount, but only for the
 // buffers themselves.
@@ -1361,13 +1558,11 @@ void run_server_full(const char* from_file) {
     // wait yeah this is more efficient done all at once i think
     // because of sorted property.
 
-    return;
+    // auto work_list_copy = work_list;
 
-    auto work_list_copy = work_list;
-
-    ServerData data{.orig_work_size = (uint32_t)work_list.size(),
+    ServerData data{.orig_work_size = (uint32_t)work_list.client_chunks.size(),
                     .chunks_done = 0,
-                    .work_list = std::move(work_list),
+                    .work = std::move(work_list),
                     .work_list_mutex = {}};
 
     printf("Starting server...\n");
@@ -1411,21 +1606,21 @@ void run_server_full(const char* from_file) {
 
     server_stopper.join();
 
-    printf("Concatenating video segments...\n");
-    DvAssert(concat_segments_iterable(
-                 [&]<typename F>(F use_func) {
-                     fmt_buf buf;
-                     fmt_buf buf2;
-                     for (auto& x : work_list_copy) {
-                         // TODO as an optimization I could reuse the same
-                         // buffer technically.
-                         x.fmt_name(buf.data());
-                         (void)snprintf(buf2.data(), buf2.size(),
-                                        "recv_client_%s", buf.data());
-                         use_func(buf2.data());
-                     }
-                 },
-                 "FINAL_OUTPUT.mp4") == 0);
+    // printf("Concatenating video segments...\n");
+    // DvAssert(concat_segments_iterable(
+    //              [&]<typename F>(F use_func) {
+    //                  fmt_buf buf;
+    //                  fmt_buf buf2;
+    //                  for (auto& x : work_list_copy) {
+    //                      // TODO as an optimization I could reuse the same
+    //                      // buffer technically.
+    //                      x.fmt_name(buf.data());
+    //                      (void)snprintf(buf2.data(), buf2.size(),
+    //                                     "recv_client_%s", buf.data());
+    //                      use_func(buf2.data());
+    //                  }
+    //              },
+    //              "FINAL_OUTPUT.mp4") == 0);
 }
 
 int main(int argc, char* argv[]) {

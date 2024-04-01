@@ -67,7 +67,7 @@ struct ConcatRange {
 };
 
 // can either be range or individual segment
-struct Segment {
+struct FixedSegment {
     unsigned int low;
     // high cannot be 0 under normal circumstances,
     // because ranges are inclusive.
@@ -80,16 +80,18 @@ struct Segment {
     [[nodiscard]] bool is_indiv() const { return high == 0; }
     [[nodiscard]] bool is_range() const { return !is_indiv(); }
 
-    void fmt_name(char* buffer) const {
+    template <size_t N> void fmt(std::array<char, N>& buffer) const {
         if (is_indiv()) [[likely]] {
-            (void)sprintf(buffer, "OUTPUT%d.mp4", low);
+            (void)snprintf(buffer.data(), buffer.size(), "OUTPUT%u.mp4", low);
 
         } else {
-            (void)sprintf(buffer, "OUTPUT_%d_%d.mp4", low, high);
+            (void)snprintf(buffer.data(), buffer.size(), "OUTPUT_%u_%u.mp4",
+                           low, high);
         }
     }
 
-    Segment(unsigned int low_, unsigned int high_) : low(low_), high(high_) {}
+    FixedSegment(unsigned int low_, unsigned int high_)
+        : low(low_), high(high_) {}
 };
 
 // Returns 0 for success, <0 for error.
@@ -163,9 +165,9 @@ inline void iter_segs(F output_i, G output_range, uint32_t nb_segments,
     }
 }
 
-inline std::vector<Segment> get_file_list(uint32_t nb_segments,
-                                          std::span<ConcatRange> segs) {
-    std::vector<Segment> segment_list{};
+inline std::vector<FixedSegment> get_file_list(uint32_t nb_segments,
+                                               std::span<ConcatRange> segs) {
+    std::vector<FixedSegment> segment_list{};
     // typical ratio of around 10% being segments
     segment_list.reserve(segs.size() * 10 + 8);
     iter_segs(
@@ -193,13 +195,20 @@ inline void iter_segfiles(F use_file, uint32_t nb_segments,
         nb_segments, segs);
 }
 
+// TODO: make standardized terminology
+// so it's more clear what stuff is referring to.
 struct SegmentResult {
     std::vector<ConcatRange> concat_ranges{};
+    // packet offsets for original, unconcatenated segments
+    // so packet_offsets[i] gives ith packet offset for ORIGINAL segment.
+    // The last element of this vector is equal to the total number of packets.
+    // Therefore, the size of this vector is equal to the number of chunks plus
+    // one.
     std::vector<uint32_t> packet_offsets{};
 };
 
 // TODO clean up this API. It's a mess currently.
-// segment video, including fixes to broken segments.
+// segment video, including fixes to broken segments (i.e. dropped B frames).
 // also TODO error handling
 // [[nodiscard]] inline std::vector<ConcatRange>
 [[nodiscard]] inline SegmentResult
