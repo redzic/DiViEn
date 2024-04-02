@@ -1195,6 +1195,8 @@ void server_stopper_thread(asio::io_context& context, ServerData& data) {
 // god this code is messy
 // TODO return nb_segments as value (and all similar functions in code)
 // sadly there's some kind of bug with segmenting that huge video.
+// TODO it might be because we're not using av_make_frame_writable.
+// Check if decoder is failing or just encoder.
 FinalWorklist server_prepare_work(const char* source_file,
                                   unsigned int& nb_segments) {
     unsigned int n_segments = 0;
