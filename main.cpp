@@ -1,11 +1,8 @@
 // gonna have to obviously disable on some configurations and whatever
-#include <unordered_set>
 #define ASIO_HAS_IO_URING 1
 #define ASIO_DISABLE_EPOLL 1
 
 // pagecache + bypassing cache?
-
-// #include <asio/detail/reactor.hpp>
 
 #include <asio.hpp>
 #include <asio/buffer.hpp>
@@ -20,7 +17,6 @@
 #include <asio/write.hpp>
 
 // ------------------
-
 #include <algorithm>
 #include <array>
 #include <cerrno>
@@ -40,6 +36,7 @@
 #include <span>
 #include <thread>
 #include <unistd.h>
+#include <unordered_set>
 #include <variant>
 #include <vector>
 
@@ -158,6 +155,7 @@ struct EncodeLoopState {
 int encode_frame(AVCodecContext* enc_ctx, AVFrame* frame, AVPacket* pkt,
                  FILE* ostream) {
     // frame can be null, which is considered a flush frame
+    DvAssert(enc_ctx != nullptr);
     int ret = avcodec_send_frame(enc_ctx, frame);
     if (ret < 0) {
         printf("error sending frame to encoder\n");
@@ -331,6 +329,11 @@ struct FrameAccurateWorkItem {
     }
 };
 
+// TODO: possible optimization idea.
+// For segments that need very high nskip value,
+// fall back to sequential model and just give.
+// that entire chunk to one client.
+
 // runs single threaded mode
 void encode_frame_range(FrameAccurateWorkItem& data, const char* fname) {
     // TODO clean up string formatting, move it all to one centralized place
@@ -360,13 +363,17 @@ void encode_frame_range(FrameAccurateWorkItem& data, const char* fname) {
         // to save time.
 
         std::visit(
-            [&](auto&& dc) {
+            [&, efptr = efptr.get()](auto&& dc) {
                 using T = std::decay_t<decltype(dc)>;
 
                 if constexpr (std::is_same_v<T, DecodeContext>) {
                     // main_encode_loop("output.mp4", arg);
                     int nb_decoded = 0;
                     // do we need to... uh...
+
+                    for (auto* frame : dc.framebuf) {
+                        av_frame_make_writable(frame);
+                    }
 
                     // TODO split loop if possible
                     if (idx == data.low_idx) {
@@ -393,6 +400,8 @@ void encode_frame_range(FrameAccurateWorkItem& data, const char* fname) {
                         DvAssert(nb_decoded > 0);
                         nleft -= nb_decoded;
 
+                        printf("Decoded %d frames\n", nb_decoded);
+
                         std::span<AVFrame*> frame_range(dc.framebuf.data(),
                                                         nb_decoded);
 
@@ -400,10 +409,9 @@ void encode_frame_range(FrameAccurateWorkItem& data, const char* fname) {
                             // required
                             frame->pict_type = AV_PICTURE_TYPE_NONE;
                             encode_frame(encoder.avcc, frame, encoder.pkt,
-                                         efptr.get());
+                                         efptr);
                             printf(ERASE_LINE_ANSI "frame= %u\n",
                                    ++nframes_done);
-                            // state.nb_frames_done++;
                         }
                     }
                 } else {
@@ -414,6 +422,7 @@ void encode_frame_range(FrameAccurateWorkItem& data, const char* fname) {
             dres);
     }
 
+    DvAssert(efptr.get() != nullptr);
     encode_frame(encoder.avcc, nullptr, encoder.pkt, efptr.get());
 }
 

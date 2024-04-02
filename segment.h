@@ -5,26 +5,6 @@
 #include <span>
 #include <vector>
 
-// TODO (IMPORTANT)
-// figure out how to move this asio stuff out of here man
-
-// #include <asio.hpp>
-// #include <asio/co_spawn.hpp>
-// #include <asio/detached.hpp>
-// #include <asio/io_context.hpp>
-// #include <asio/ip/tcp.hpp>
-// #include <asio/signal_set.hpp>
-// #include <asio/write.hpp>
-
-// using asio::awaitable;
-
-// using asio::use_awaitable;
-
-// extern "C" {
-// #include <libavformat/avformat.h>
-// #include <libavutil/timestamp.h>
-// }
-
 // ok so...
 // segment_end CAN be called in write_trailer,
 // but with an additional flag.
