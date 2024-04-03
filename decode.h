@@ -55,11 +55,11 @@ struct DecoderCreationError {
 // maybe add ctrl+C interrupt that just stops and flushes all packets so far?
 
 constexpr size_t CHUNK_FRAME_SIZE = 60;
-constexpr size_t NUM_WORKERS = 4;
-constexpr size_t THREADS_PER_WORKER = 2;
+constexpr size_t NUM_WORKERS = 2;
+constexpr size_t THREADS_PER_WORKER = 4;
 
-constexpr size_t framebuf_size = CHUNK_FRAME_SIZE * NUM_WORKERS;
-using FrameBuf = std::array<AVFrame*, framebuf_size>;
+constexpr size_t FRAMEBUF_SIZE = CHUNK_FRAME_SIZE * NUM_WORKERS;
+using FrameBuf = std::array<AVFrame*, FRAMEBUF_SIZE>;
 
 // yeah so even if you override the destructor, the other destructors
 // still run afterward which is good.
@@ -142,6 +142,7 @@ struct DecodeContext {
           video_index(vindex) {}
 
     // Open file and initialize video decoder.
+    // TODO switch to std::expected
     [[nodiscard]] static std::variant<DecodeContext, DecoderCreationError>
     open(const char* url);
 };
@@ -203,3 +204,62 @@ struct CountFramesResult {
 };
 
 [[nodiscard]] CountFramesResult count_video_packets(DecodeContext& dc);
+
+// returns 0 on success, or a negative number on failure.
+inline int decode_next(DecodeContext& dc, AVFrame* frame) {
+    bool flush_sent = false;
+    while (true) {
+        // Flush any frames currently in the decoder
+        //
+        // This is needed in case we send a packet, read some of its frames and
+        // stop because of max_frames, and need to keep reading frames from the
+        // decoder on the next chunk.
+
+        int ret = avcodec_receive_frame(dc.decoder, frame);
+        if (ret == AVERROR_EOF) [[unlikely]] {
+            return ret;
+        } else if (ret == AVERROR(EAGAIN)) {
+            // just continue down the loop sending a packet
+        } else if (ret < 0) [[unlikely]] {
+            return ret;
+        } else if (ret == 0) {
+            return 0;
+        }
+
+        // Get packet (compressed data) from demuxer
+        ret = av_read_frame(dc.demuxer, dc.pkt);
+        // EOF in compressed data
+        if (ret < 0) [[unlikely]] {
+            // if we got here, that means there are no more available packets,
+            // and we didn't receive a frame beforehand.
+            // so we need to send a flush packet and try again.
+            if (!flush_sent) {
+                avcodec_send_packet(dc.decoder, nullptr);
+                // TODO maybe this should be in the data structure
+                flush_sent = true;
+                continue;
+            } else {
+                return ret;
+            }
+        }
+
+        // skip packets other than the ones we're interested in
+        if (dc.pkt->stream_index != dc.video_index) [[unlikely]] {
+            av_packet_unref(dc.pkt);
+            continue;
+        }
+
+        // Send the compressed data to the decoder
+        ret = avcodec_send_packet(dc.decoder, dc.pkt);
+        if (ret < 0) [[unlikely]] {
+            // Error decoding frame
+            av_packet_unref(dc.pkt);
+
+            printf("Error decoding frame!\n");
+
+            return ret;
+        } else {
+            av_packet_unref(dc.pkt);
+        }
+    }
+}

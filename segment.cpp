@@ -1,12 +1,15 @@
 #include "segment.h"
 #include "concat.h"
 #include "decode.h"
+
+extern "C" {
 #include "ff_segment_muxer.h"
 #include "libavformat/avformat.h"
+}
+
 #include "resource.h"
 
 #include <array>
-#include <cassert>
 
 // This computes the second part of the thing
 // We need the broken segments to be able to do whatever.
@@ -289,7 +292,10 @@ end:
     avformat_free_context(ofmt_ctx);
 
     if (ret < 0 && ret != AVERROR_EOF) {
-        fprintf(stderr, "Error occurred: %s\n", av_err2str(ret));
+        std::array<char, AV_ERROR_MAX_STRING_SIZE> errbuf{};
+        av_make_error_string(errbuf.data(), errbuf.size(), ret);
+        (void)fprintf(stderr, "Error occurred: %s\n", errbuf.data());
+
         return ret;
     }
 

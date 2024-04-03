@@ -1,4 +1,5 @@
 // gonna have to obviously disable on some configurations and whatever
+#include <cassert>
 #define ASIO_HAS_IO_URING 1
 #define ASIO_DISABLE_EPOLL 1
 
@@ -103,6 +104,12 @@ void segvHandler(int /*unused*/) {
     exit(EXIT_FAILURE); // NOLINT
 }
 
+auto av_strerr(int averror) {
+    std::array<char, AV_ERROR_MAX_STRING_SIZE> errbuf;
+    av_make_error_string(errbuf.data(), errbuf.size(), averror);
+    return errbuf;
+}
+
 // Idea:
 // we could send the same chunk
 // to different nodes if one is not doing it fast enough.
@@ -149,37 +156,69 @@ struct EncodeLoopState {
     }
 };
 
+// ok so the next step would be to fix this null frame thing
+// which probably has to do with incorrect usage of make_writable.
+// also eventually we should somehow figure out how to add tests.
+
+// also codec parameters don't really seem to be set correctly,
+// not really sure why.
+
+// we should probably also set timestamps properly.
+
+bool avframe_has_buffer(AVFrame* frame) {
+    // printf("[width x height]: %dx%d\n", frame->width, frame->height);
+    return frame->buf[0] != nullptr && frame->width > 0 && frame->height > 0;
+}
+
 // If pkt is refcounted, we shouldn't have to copy any data.
 // But the encoder may or may not create a reference.
 // I think it probably does? Idk.
 int encode_frame(AVCodecContext* enc_ctx, AVFrame* frame, AVPacket* pkt,
-                 FILE* ostream) {
+                 FILE* ostream, std::atomic<uint32_t>& frame_count) {
     // frame can be null, which is considered a flush frame
     DvAssert(enc_ctx != nullptr);
     int ret = avcodec_send_frame(enc_ctx, frame);
+
+    // I think it has to do with some of the metadata not being the same...
+    // compared to the previous frames. Does that have to do with segmenting?
+    // if the issue doesn't happen on chunks that are fixed up, then
+    // perhaps there's a pattern there...
+    // But then why does it happen only on like the 3RD frame and only on
+    // SOME encoders?
+    if (frame != nullptr) {
+        DvAssert(avframe_has_buffer(frame));
+    }
+
     if (ret < 0) {
-        printf("error sending frame to encoder\n");
+        // TODO deduplicate, make macro or function to do this
+        if (frame == nullptr) {
+            printf("error sending flush frame to encoder: ");
+        } else {
+            printf("error sending frame to encoder: ");
+        }
+        printf("encoder error: %s\n", av_strerr(ret).data());
+
         return ret;
     }
 
     while (true) {
         int ret = avcodec_receive_packet(enc_ctx, pkt);
         // why check for eof though?
+        // what does eof mean here?
         // actually this doesn't really seem correct
+        // well we are running multiple encoders aren't we?
+        // so that's why we get eof. I guess. idk.
         if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
             return 0;
         } else if (ret < 0) {
             printf("unspecified error during encoding\n");
             return ret;
         }
+        frame_count++;
 
         // can write the compressed packet to the bitstream now
 
-        // ostream.write(reinterpret_cast<char*>(pkt->data), pkt->size);
         (void)fwrite(pkt->data, pkt->size, 1, ostream);
-
-        // just printing this takes 100ms...
-        // printf("received packet from encoder of %d bytes\n", pkt->size);
 
         // WILL NEED THIS FUNCTION: av_frame_make_writable
         //
@@ -242,8 +281,9 @@ struct EncoderContext {
     // TODO proper error handling, return std::expected
     // caller needs to ensure they only call this once
     void initialize_codec(AVFrame* frame) {
-        // const auto* codec = avcodec_find_encoder_by_name("libaom-av1");
-        const auto* codec = avcodec_find_encoder_by_name("libx264");
+        // printf("INITIALIZING CODEC\n");
+        const auto* codec = avcodec_find_encoder_by_name("libaom-av1");
+        // const auto* codec = avcodec_find_encoder_by_name("libx264");
         avcc = avcodec_alloc_context3(codec);
         DvAssert(avcc);
         pkt = av_packet_alloc();
@@ -253,18 +293,21 @@ struct EncoderContext {
         avcc->time_base = (AVRational){1, 25};
         avcc->framerate = (AVRational){25, 1};
 
+        DvAssert(frame->width > 0);
+        DvAssert(frame->height > 0);
+
         avcc->width = frame->width;
         avcc->height = frame->height;
         avcc->pix_fmt =
             av_pix_fmt_supported_version((AVPixelFormat)frame->format);
 
         // X264/5:
-        av_opt_set(avcc->priv_data, "crf", "30", 0);
-        av_opt_set(avcc->priv_data, "preset", "ultrafast", 0);
+        // av_opt_set(avcc->priv_data, "crf", "30", 0);
+        // av_opt_set(avcc->priv_data, "preset", "ultrafast", 0);
         // AOM:
-        // av_opt_set(avcc->priv_data, "cpu-used", "6", 0);
-        // av_opt_set(avcc->priv_data, "end-usage", "q", 0);
-        // av_opt_set(avcc->priv_data, "cq-level", "30", 0);
+        av_opt_set(avcc->priv_data, "cpu-used", "6", 0);
+        av_opt_set(avcc->priv_data, "end-usage", "q", 0);
+        av_opt_set(avcc->priv_data, "cq-level", "30", 0);
         // av_opt_set(avcc->priv_data, "enable-qm", "1", 0);
 
         int ret = avcodec_open2(avcc, codec, nullptr);
@@ -295,11 +338,12 @@ int encode_frames(const char* file_name, std::span<AVFrame*> frame_buffer,
     for (auto* frame : frame_buffer) {
         // required
         frame->pict_type = AV_PICTURE_TYPE_NONE;
-        encode_frame(encoder.avcc, frame, encoder.pkt, file.get());
-        state.nb_frames_done++;
+        encode_frame(encoder.avcc, frame, encoder.pkt, file.get(),
+                     state.nb_frames_done);
     }
     // need to send flush packet after we're done
-    encode_frame(encoder.avcc, nullptr, encoder.pkt, file.get());
+    encode_frame(encoder.avcc, nullptr, encoder.pkt, file.get(),
+                 state.nb_frames_done);
 
     return 0;
 }
@@ -335,84 +379,100 @@ struct FrameAccurateWorkItem {
 // that entire chunk to one client.
 
 // runs single threaded mode
-void encode_frame_range(FrameAccurateWorkItem& data, const char* fname) {
-    // TODO clean up string formatting, move it all to one centralized place
-    // format is
-    // "client_input_{idx}.mp4"
-
+// TODO clean up string formatting, move it all to one centralized place
+// format is
+// "client_input_{idx}.mp4"
+// TODO: use concat filter for this part of the code.
+void encode_frame_range(FrameAccurateWorkItem& data, const char* ofname) {
     // we only skip frames on the first chunk, otherwise it wouldn't
     // make any sense. All chunks have frames we need to decode.
     EncoderContext encoder;
     // now we have to encode exactly ndecode frames
     auto nleft = data.ndecode;
 
-    make_file(efptr, fname, "wb");
+    make_file(ofptr, ofname, "wb");
 
     bool enc_was_init = false;
-    uint32_t nframes_done = 0;
+    std::atomic<uint32_t> nframes_done = 0;
 
     printf("frame= 0\n");
 
     for (uint32_t idx = data.low_idx; idx <= data.high_idx; idx++) {
+
         fmt_buf input_fname;
         (void)snprintf(input_fname.data(), input_fname.size(),
                        "client_input_%d.mp4", idx);
+
+        printf("=========== NEW SUBCHUNK. OPENING %s FOR READING.\n",
+               input_fname.data());
+
         auto dres = DecodeContext::open(input_fname.data());
 
         // perhaps we could initialize all these decoders at the same time...
         // to save time.
+        // TODO reuse underlying frame buffer
 
         std::visit(
-            [&, efptr = efptr.get()](auto&& dc) {
+            [&, ofptr = ofptr.get()](auto&& dc) {
                 using T = std::decay_t<decltype(dc)>;
 
                 if constexpr (std::is_same_v<T, DecodeContext>) {
-                    // main_encode_loop("output.mp4", arg);
-                    int nb_decoded = 0;
-                    // do we need to... uh...
-
-                    for (auto* frame : dc.framebuf) {
-                        av_frame_make_writable(frame);
-                    }
-
                     // TODO split loop if possible
                     if (idx == data.low_idx) {
                         // means we first need to decode nskip frames
-                        if (data.nskip > 0) {
-                            DvAssert(run_decoder(dc, 0, 1) == 1);
-                            encoder.initialize_codec(dc.framebuf[0]);
-                            enc_was_init = true;
-                            for (auto nf = data.nskip - 1; nf != 0; nf--) {
-                                DvAssert(run_decoder(dc, 0, 1) == 1);
+                        // initially, frames are not writable. Because they
+                        // have
+                        // not been properly allocated yet, their actual
+                        // buffers
+                        // I mean. The decoder allocates those buffers.
+                        for (uint32_t nf = 0; nf < data.nskip; nf++) {
+                            AVFrame* frame = av_frame_alloc();
+
+                            // first iteration of loop
+                            DvAssert(decode_next(dc, frame) == 0);
+                            if (nf == 0) {
+                                encoder.initialize_codec(frame);
+                                enc_was_init = true;
                             }
+                            av_frame_unref(frame);
                         }
+                    } else {
+                        DvAssert(enc_was_init);
                     }
 
                     // TODO allow configurable frame size when constructing
                     // decoder, to avoid wasting memory
-                    while (nleft > 0 &&
-                           (nb_decoded = run_decoder(dc, 0, nleft)) > 0) {
+                    while (nleft > 0) {
+                        printf("%d frames left\n\n", nleft);
+
+                        AVFrame* frame = av_frame_alloc();
+
+                        int ret;
+                        if ((ret = decode_next(dc, frame)) != 0) {
+                            printf("Decoder unexpectedly returned error: %s\n",
+                                   av_strerr(ret).data());
+                            break;
+                        }
+
                         if (!enc_was_init) [[unlikely]] {
-                            encoder.initialize_codec(dc.framebuf[0]);
+                            encoder.initialize_codec(frame);
                             enc_was_init = true;
                         }
 
-                        DvAssert(nb_decoded > 0);
-                        nleft -= nb_decoded;
+                        DvAssert(frame != nullptr);
+                        DvAssert(avframe_has_buffer(frame));
+                        // so the issue is not that the frame doesn't have a
+                        // buffer, hmm...
+                        // DvAssert(av_frame_make_writable(frame) == 0);
+                        printf("Sending frame... Is writable? %d\n",
+                               av_frame_is_writable(frame));
+                        DvAssert(encode_frame(encoder.avcc, frame, encoder.pkt,
+                                              ofptr, nframes_done) == 0);
+                        printf("frame= %u\n", nframes_done.load());
 
-                        printf("Decoded %d frames\n", nb_decoded);
+                        av_frame_unref(frame);
 
-                        std::span<AVFrame*> frame_range(dc.framebuf.data(),
-                                                        nb_decoded);
-
-                        for (auto* frame : frame_range) {
-                            // required
-                            frame->pict_type = AV_PICTURE_TYPE_NONE;
-                            encode_frame(encoder.avcc, frame, encoder.pkt,
-                                         efptr);
-                            printf(ERASE_LINE_ANSI "frame= %u\n",
-                                   ++nframes_done);
-                        }
+                        nleft--;
                     }
                 } else {
                     printf("Decoder failed to open for input file '%s'\n",
@@ -422,14 +482,23 @@ void encode_frame_range(FrameAccurateWorkItem& data, const char* fname) {
             dres);
     }
 
-    DvAssert(efptr.get() != nullptr);
-    encode_frame(encoder.avcc, nullptr, encoder.pkt, efptr.get());
+    DvAssert(ofptr.get() != nullptr);
+    printf("Sending flush packet...\n");
+    // why does this return an error?
+    encode_frame(encoder.avcc, nullptr, encoder.pkt, ofptr.get(), nframes_done);
 }
 
 // framebuf is start of frame buffer that worker can use
 int worker_thread(unsigned int worker_id, DecodeContext& decoder,
                   EncodeLoopState& state) {
     while (true) {
+        for (size_t i = 0; i < CHUNK_FRAME_SIZE; i++) {
+            size_t idx = worker_id * CHUNK_FRAME_SIZE + i;
+            if (avframe_has_buffer(decoder.framebuf[idx])) {
+                DvAssert(av_frame_make_writable(decoder.framebuf[idx]) == 0);
+            }
+        }
+
         // should only access decoder once lock has been acquired
         // uh should we replace with like unique_lock or lock_guard
         // or something like that?
@@ -813,14 +882,17 @@ constexpr size_t TCP_BUFFER_SIZE = 2048z * 32 * 4; // 256 Kb buffer
 
 // TODO move networking code to another flie.
 
+// TODO: file not existing errors need to be properly displayed to user,
+// not a runtime segfault and only debug assert.
+
 // Returns number of bytes read.
 // TODO make async.
-[[nodiscard]] awaitable<size_t>
-socket_send_file(tcp_socket& socket, const char* filename,
-                 asio::error_code& error) { // Open a file in read mode
-
+[[nodiscard]] awaitable<size_t> socket_send_file(tcp_socket& socket,
+                                                 const char* filename,
+                                                 asio::error_code& error) {
     printf("Called socket_send_file\n");
 
+    // Open a file in read mode
     make_file(fptr, filename, "rb");
     if (!filename) {
         printf("Opening file %s failed\n", filename);
@@ -1024,10 +1096,8 @@ struct ServerData {
 
 // like number of chunks that there are.
 
-[[nodiscard]] awaitable<void> handle_conn(asio::io_context& context,
-                                          tcp_socket socket,
-                                          unsigned int conn_num,
-                                          ServerData& state) {
+[[nodiscard]] awaitable<void>
+handle_conn(tcp_socket socket, unsigned int conn_num, ServerData& state) {
     try {
 
         printf("Entered handle_conn\n");
@@ -1071,9 +1141,15 @@ struct ServerData {
                     co_return;
                 }
 
+                // work = state.work.client_chunks.at(15);
                 // get some work to be done
-                work = state.work.client_chunks.back();
+                // TODO: write some code to double check frame ranges and
+                // compute frame hashes or whatever.
+                // but we will need to validate it with some external
+                // thing.
+                // I think it might be something in our decode loop logic.
 
+                work = state.work.client_chunks.back();
                 state.work.client_chunks.pop_back();
             }
 
@@ -1121,7 +1197,6 @@ struct ServerData {
                 // are using it... I think the indexes are mismatched. But
                 // we do need to fix this.
                 printf(" --- INDEX %d\n", i);
-                // state.work.source_chunks.at(i).fmt(fname);
                 state.work.source_chunks.at(i).fmt(fname);
 
                 // we are uploading this
@@ -1425,8 +1500,7 @@ awaitable<void> run_server(asio::io_context& context, const char* source_file,
         // Ideally we should add some kind of mechanism to track when stuff
         // is
         // finished.
-        co_spawn(context,
-                 handle_conn(context, std::move(socket), conn_num, state),
+        co_spawn(context, handle_conn(std::move(socket), conn_num, state),
                  detached);
 
         printf("[TCP] Connection %d closed\n", conn_num);
@@ -1482,8 +1556,6 @@ awaitable<void> run_client(asio::io_context& io_context, tcp_socket socket,
 
     // TODO I need to detect when the client sends some nonsense.
     // Rn there are no checks.
-
-    // TODO fix gcc warnings.
 
     // where to dump the input file from the server
     fmt_buf input_buf;
@@ -1560,24 +1632,14 @@ awaitable<void> run_client(asio::io_context& io_context, tcp_socket socket,
         //     socket_send_file(socket, output_buf.data(), error));
 
         fmt_buf output_buf;
-        (void)snprintf(output_buf.data(), output_buf.size(), "enc_%u%u%u%u.mp4",
-                       work.low_idx, work.high_idx, work.nskip, work.ndecode);
+        (void)snprintf(output_buf.data(), output_buf.size(),
+                       "enc_%u_%u_%u_%u.mp4", work.low_idx, work.high_idx,
+                       work.nskip, work.ndecode);
 
         encode_frame_range(work, output_buf.data());
 
         co_await DISPLAY_SPEED(
             socket_send_file(socket, output_buf.data(), error));
-
-        // // send filler/junk data
-        // uint32_t todo_delete = 4;
-        // co_await asio::async_write(socket, asio::buffer(&todo_delete, 4),
-        //                            use_awaitable);
-        // co_await asio::async_write(socket, asio::buffer(&todo_delete, 4),
-        //                            use_awaitable);
-        // todo_delete = 0;
-        // // write "null terminator"
-        // co_await asio::async_write(socket, asio::buffer(&todo_delete, 4),
-        //                            use_awaitable);
 
         printf("Uploaded %s to server\n", output_buf.data());
     }
@@ -1680,7 +1742,9 @@ void run_server_full(const char* from_file) {
     ServerData data{.orig_work_size = (uint32_t)work_list.client_chunks.size(),
                     .chunks_done = 0,
                     .work = std::move(work_list),
-                    .work_list_mutex = {}};
+                    .work_list_mutex = {},
+                    .tk_cv = {},
+                    .tk_cv_m = {}};
 
     printf("Starting server...\n");
     asio::io_context io_context(1);
@@ -1740,6 +1804,45 @@ void run_server_full(const char* from_file) {
     //              "FINAL_OUTPUT.mp4") == 0);
 }
 
+void run_client_full() {
+    // TODO deduplicate code, as it's exact same between client and
+    // server
+    // a really cursed way would be with both executing this code and
+    // then a goto + table.
+    // Like you would do if server, set index=0, goto this. code,
+    // goto[index]. same for other one
+    asio::io_context io_context(1);
+
+    asio::signal_set signals(io_context, SIGINT, SIGTERM);
+    signals.async_wait([&](auto, auto) {
+        io_context.stop();
+
+        // TODO access exit function safely if possible
+        // not sure how thread safe this is
+        exit(EXIT_FAILURE);
+    });
+
+    tcp::resolver resolver(io_context);
+
+    auto endpoints = resolver.resolve("localhost", "7878");
+    asio::error_code error;
+
+    tcp_socket socket(io_context);
+    asio::connect(socket, endpoints, error);
+
+    if (error) {
+        // TODO any way to avoid constructing std::string?
+        auto msg = error.message();
+        printf("Error occurred connecting to server: %s\n", msg.c_str());
+        exit(EXIT_FAILURE);
+    }
+
+    co_spawn(io_context, run_client(io_context, std::move(socket), error),
+             detached);
+
+    io_context.run();
+}
+
 int main(int argc, char* argv[]) {
     if (argc < 2) {
         printf("DiViEn: must specify at least 2 args.\n");
@@ -1751,7 +1854,6 @@ int main(int argc, char* argv[]) {
     sigIntHandler.sa_handler = my_handler;
     sigemptyset(&sigIntHandler.sa_mask);
     sigIntHandler.sa_flags = 0;
-
     sigaction(SIGINT, &sigIntHandler, nullptr);
 
     av_log_set_callback(avlog_do_nothing);
@@ -1773,46 +1875,15 @@ int main(int argc, char* argv[]) {
 
             run_server_full(argv[2]);
         } else if (mode == "client") {
+            // FrameAccurateWorkItem work{
+            //     .low_idx = 26, .high_idx = 26, .nskip = 0, .ndecode = 50};
+            // so it VERY SPECIFICALLY has to do with putting together frames
+            // from multiple different sources.
+            // Perhaps we can use the concat FILTER to deal with this problem.
+            // I hope that would work.
+            // encode_frame_range(work, "random.mp4");
 
-            // TODO deduplicate code, as it's exact same between client and
-            // server
-            // a really cursed way would be with both executing this code and
-            // then a goto + table.
-            // Like you would do if server, set index=0, goto this. code,
-            // goto[index]. same for other one
-            asio::io_context io_context(1);
-
-            asio::signal_set signals(io_context, SIGINT, SIGTERM);
-            signals.async_wait([&](auto, auto) {
-                io_context.stop();
-
-                // TODO access exit function safely if possible
-                // not sure how thread safe this is
-                exit(EXIT_FAILURE);
-            });
-
-            tcp::resolver resolver(io_context);
-
-            auto endpoints = resolver.resolve("localhost", "7878");
-            asio::error_code error;
-
-            tcp_socket socket(io_context);
-            asio::connect(socket, endpoints, error);
-
-            if (error) {
-                // TODO any way to avoid constructing std::string?
-                auto msg = error.message();
-                printf("Error occurred connecting to server: %s\n",
-                       msg.c_str());
-                return -1;
-            }
-
-            co_spawn(io_context,
-                     run_client(io_context, std::move(socket), error),
-                     detached);
-
-            io_context.run();
-
+            run_client_full();
         } else if (mode == "standalone") {
             if (argc < 3) {
                 printf(
@@ -1932,12 +2003,8 @@ int main_unused(int argc, char* argv[]) {
 
                 // TODO move all this into its own function
                 if (error.type == DecoderCreationError::AVError) {
-                    std::array<char, AV_ERROR_MAX_STRING_SIZE> errbuf{};
-                    av_make_error_string(errbuf.data(), errbuf.size(),
-                                         error.averror);
-
                     (void)fprintf(stderr, "Failed to initialize decoder: %s\n",
-                                  errbuf.data());
+                                  av_strerr(error.averror).data());
 
                 } else {
                     std::string_view errmsg = error.errmsg();

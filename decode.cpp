@@ -4,7 +4,9 @@
 #include "libavformat/avformat.h"
 #include "libavutil/avutil.h"
 #include "resource.h"
+#include <libavutil/frame.h>
 
+// std::variant<DecodeContext, DecoderCreationError>
 std::variant<DecodeContext, DecoderCreationError>
 DecodeContext::open(const char* url) {
     auto pkt = make_resource<AVPacket, av_packet_alloc, av_packet_free>();
@@ -119,6 +121,7 @@ int run_decoder(DecodeContext& dc, size_t framebuf_offset, size_t max_frames) {
     // TODO I think the second part of this bounds check is redundant.
     if ((framebuf_offset + max_frames - 1) >= dc.framebuf.size() ||
         framebuf_offset >= dc.framebuf.size()) [[unlikely]] {
+        DvAssert(false && "BOUNDS CHECK FAILED.\n");
         // bounds check failed
         return -1;
     }
