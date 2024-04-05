@@ -265,6 +265,8 @@ AVPixelFormat av_pix_fmt_supported_version(AVPixelFormat pix_fmt) {
 // we need to make a version of this that doesn't just encode everything and
 // flush the output at once
 
+#define ENCODER_NAME "libaom-av1"
+
 struct EncoderContext {
     AVCodecContext* avcc{nullptr};
     AVPacket* pkt{nullptr};
@@ -278,9 +280,7 @@ struct EncoderContext {
     // TODO proper error handling, return std::expected
     // caller needs to ensure they only call this once
     void initialize_codec(AVFrame* frame) {
-        // printf("INITIALIZING CODEC\n");
-        const auto* codec = avcodec_find_encoder_by_name("libaom-av1");
-        // const auto* codec = avcodec_find_encoder_by_name("libx264");
+        const auto* codec = avcodec_find_encoder_by_name(ENCODER_NAME);
         avcc = avcodec_alloc_context3(codec);
         DvAssert(avcc);
         pkt = av_packet_alloc();
@@ -1887,6 +1887,10 @@ int main(int argc, char* argv[]) {
                     "Insufficient arguments specified for standalone mode.\n");
                 return -1;
             }
+            printf(
+                "Using %zu workers (%zu threads per worker), chunk size = %zu "
+                "frames per worker\nEncoder: " ENCODER_NAME "\n",
+                NUM_WORKERS, THREADS_PER_WORKER, CHUNK_FRAME_SIZE);
 
             auto vdec = DecodeContext::open(argv[2]);
 

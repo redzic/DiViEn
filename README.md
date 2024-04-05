@@ -17,8 +17,7 @@ give suggestions, you can join the discord server: https://discord.gg/NEwN2sTDbj
 
 ## Compilation
 
-This project depends on ASIO (non Boost version), FFmpeg 6.1, and io-uring (this
-limitation will be lifted soon). It requires a C++20 compiler.
+This project depends on ASIO (non Boost version), FFmpeg 6.1, and io-uring. It requires a C++20 compiler.
 
 To compile this project, run:
 
@@ -40,6 +39,14 @@ To run the local chunked encoder:
 The output will be in `standalone_output.mp4`.
 
 A proper CLI will be implemented later.
+
+Note that this might be slow on your machine because of the default amount of workers. (See: Current Limitations.)
+For now, please edit the variables in the source code and recompile to use different amounts of workers and threads (See the file decode.h, variables NUM_WORKERS, THREADS_PER_WORKER, and CHUNK_FRAME_SIZE). Like I said I will get to implementing a proper CLI later.
+
+The same applies for encoding parameters.
+
+The output file may not be fully compatible with some video players at the moment due to
+a lack of proper timestamps being set. This should be fixed in the future.
 
 ### Current Limitations 
 

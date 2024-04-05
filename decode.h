@@ -55,7 +55,7 @@ struct DecoderCreationError {
 // maybe add ctrl+C interrupt that just stops and flushes all packets so far?
 
 constexpr size_t CHUNK_FRAME_SIZE = 60;
-constexpr size_t NUM_WORKERS = 2;
+constexpr size_t NUM_WORKERS = 4;
 constexpr size_t THREADS_PER_WORKER = 4;
 
 constexpr size_t FRAMEBUF_SIZE = CHUNK_FRAME_SIZE * NUM_WORKERS;
