@@ -1,7 +1,4 @@
 // gonna have to obviously disable on some configurations and whatever
-#include <cassert>
-#define ASIO_HAS_IO_URING 1
-#define ASIO_DISABLE_EPOLL 1
 
 // pagecache + bypassing cache?
 

@@ -1,26 +1,24 @@
 cmake_minimum_required(VERSION 3.26)
 
-# set(CMAKE_C_COMPILER clang)
-# set(CMAKE_CXX_COMPILER clang++)
-
 project(DiViEn)
 
-# set(CMAKE_CXX_STANDARD 26)
 set(CMAKE_CXX_STANDARD 23)
-set(CMAKE_BUILD_TYPE Debug)
-# set(CMAKE_BUILD_TYPE Release)
-# set(CMAKE_EXPORT_COMPILE_COMMANDS TRUE)
+set(CMAKE_BUILD_TYPE Release)
 
 set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
 set(CMAKE_COLOR_MAKEFILE TRUE)
 set(CMAKE_COLOR_DIAGNOSTICS ON)
 
+set(ENABLE_IO_URING OFF CACHE BOOL "Use io-uring for tcp on linux (default off)")
 
-# apparently the leak detection has to do with -fno-omit-frame-pointer in libavcodec.
-# add_compile_options(-fsanitize=address -fsanitize=undefined -fno-omit-frame-pointer)
-# add_link_options(-fsanitize=address -fsanitize=undefined -fno-omit-frame-pointer)
-# add_compile_options(-fsanitize=undefined -fno-omit-frame-pointer)
-# add_link_options(-fsanitize=undefined -fno-omit-frame-pointer)
+# Option to enable defining custom values
+option(ENABLE_IO_URING "Use io-uring for tcp on linux (default off)" OFF)
+
+if(ENABLE_IO_URING)
+  add_definitions(-DASIO_HAS_IO_URING=1)
+  add_definitions(-DASIO_DISABLE_EPOLL=1)
+endif()
+
 
 # add_compile_options(-fsanitize=undefined -fsanitize=address -fsanitize=bounds -fsanitize=unsigned-integer-overflow  -fsanitize=local-bounds -fsanitize=signed-integer-overflow,null,alignment -fno-sanitize-recover=null -fsanitize-trap=alignment -fno-omit-frame-pointer)
 # add_link_options(-fsanitize=undefined -fsanitize=address -fsanitize=bounds -fsanitize=unsigned-integer-overflow  -fsanitize=local-bounds -fsanitize=signed-integer-overflow,null,alignment -fno-sanitize-recover=null -fsanitize-trap=alignment -fno-omit-frame-pointer)
@@ -54,4 +52,7 @@ pkg_check_modules(LIBAV REQUIRED IMPORTED_TARGET
 add_executable(DiViEn main.cpp decode.cpp segment.cpp)
 
 target_compile_options(DiViEn PRIVATE -Wall -Wextra -Wformat -Wno-c99-designator )
-target_link_libraries( DiViEn PkgConfig::LIBAV uring )
+if(ENABLE_IO_URING)
+    target_link_libraries( DiViEn uring )
+endif()
+target_link_libraries( DiViEn PkgConfig::LIBAV )
