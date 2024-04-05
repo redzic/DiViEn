@@ -17,7 +17,7 @@ give suggestions, you can join the discord server: https://discord.gg/NEwN2sTDbj
 
 ## Compilation
 
-This project depends on ASIO (non Boost version), FFmpeg 6.1, and io-uring. It requires a C++20 compiler.
+This project depends on ASIO (non Boost version), FFmpeg 6.1, and optionally io-uring on linux (disabled by default). It requires a C++20 compiler.
 
 To compile this project, run:
 
@@ -47,6 +47,8 @@ The same applies for encoding parameters.
 
 The output file may not be fully compatible with some video players at the moment due to
 a lack of proper timestamps being set. This should be fixed in the future.
+
+Distributed encoding currently is implemented in a basic form, but contains bugs. These should be fixed in the future.
 
 ### Current Limitations 
 
