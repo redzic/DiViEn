@@ -1863,11 +1863,13 @@ int try_parse_uint(unsigned int& result, const char* sp,
         result = value;
         return 0;
     } else if (ec == std::errc::invalid_argument) {
-        printf("DiViEn: error: argument for %.*s: invalid argument\n",
-               (int)argname.size(), argname.data());
+        (void)fprintf(stderr,
+                      "DiViEn: Error: Argument for %.*s: invalid argument\n",
+                      (int)argname.size(), argname.data());
     } else if (ec == std::errc::result_out_of_range) {
-        printf("DiViEn: error: argument for %.*s: value out of range\n",
-               (int)argname.size(), argname.data());
+        (void)fprintf(stderr,
+                      "DiViEn: Error: Argument for %.*s: value out of range\n",
+                      (int)argname.size(), argname.data());
     }
     return -1;
 }
@@ -1932,8 +1934,8 @@ int main(int argc, char* argv[]) {
             run_client_full();
         } else if (mode == "standalone") {
             if (argc < 3) {
-                w_err(
-                    "Insufficient arguments specified for standalone mode.\n");
+                w_err("DiViEn: Insufficient arguments specified for standalone "
+                      "mode.\n");
                 return -1;
             }
 
@@ -2079,101 +2081,3 @@ int main(int argc, char* argv[]) {
 // decoding totally independently of workers, just fills up a buffer of free
 // frames. And then the workers get assigned ranges of the buffer.
 // In general this sounds pretty complicated though.
-
-// Well perhaps we could use the make_frame_writable thing or whatever.
-
-// Well one idea is we could
-
-// io_uring, IOCP. Can we make ASIO use these?
-
-int main_unused(int argc, char* argv[]) {
-    if (signal(SIGSEGV, segvHandler) == SIG_ERR) {
-        w_err("signal(): failed to set SIGSEGV signal handler\n");
-    }
-
-    if (argc != 2) {
-        w_err("DiViEn: invalid number of arguments\n"
-              "   usage: DiViEn  <video_file>\n");
-        return -1;
-    }
-    const char* url = argv[1];
-
-    // I think maybe next step will be cleaning up the code. So that it will
-    // be feasible to continue working on this.
-
-    // TODO maybe add option to not copy timestamps.
-    // Dang this stuff is complicated.
-
-    // 1432 max index
-
-    // ok so unfortunately it does seem like it's possible to
-    // have totally adjacent segments with broken framecounts.
-    // In which case I believe we need to concatenate longer
-    // segments.
-    // But hopefully it isn't possible that the very first segment
-    // has extra packets.
-
-    return 0;
-
-    // av_log_set_level(AV_LOG_VERBOSE);
-
-    // segment_video("/home/yusuf/avdist/test_x265.mp4", "OUTPUT%d.mp4");
-    // so concat code works perfectly fine
-    // unsigned int nb_segments = 30;
-
-    // TODO: Dynamically count number of segments made.
-    // Is there a way to do that from ffmpeg directly?
-    // identify_broken_segments(nb_segments);
-
-    // can assume argv[1] is now available
-
-    // so as soon as you use something like std::cout, the binary size
-    // increases greatly...
-
-    // so we should probably find a way to not use things that increase the
-    // binary size a lot...
-
-    // bro WHY are there dropped frames...
-    // when decoding man... I just don't get all of them.
-
-    // TODO allow setting log level via CLI
-    av_log_set_callback(avlog_do_nothing);
-    // should I just modify the ffmpeg library to do what
-    // I need it to do? Hmm... Well it won't work with the system
-    // version of the library then, unfortunately.
-    // av_log_default_callback();
-
-    // TODO move all this to another function
-
-    auto vdec = DecodeContext::open(url, 1);
-
-    // TODO use std::expected instead?
-    std::visit(
-        [](auto&& arg) {
-            using T = std::decay_t<decltype(arg)>;
-
-            if constexpr (std::is_same_v<T, DecodeContext>) {
-                main_encode_loop("output.mp4", arg, 1, 60, 1);
-
-            } else if constexpr (std::is_same_v<T, DecoderCreationError>) {
-                auto error = arg;
-
-                // TODO move all this into its own function
-                if (error.type == DecoderCreationError::AVError) {
-                    (void)fprintf(stderr, "Failed to initialize decoder: %s\n",
-                                  av_strerr(error.averror).data());
-
-                } else {
-                    std::string_view errmsg = error.errmsg();
-                    (void)fprintf(stderr,
-                                  "Failed to initialize decoder: %.*s\n",
-                                  (int)errmsg.size(), errmsg.data());
-                }
-            } else {
-                static_assert(always_false_v<T>);
-            }
-        },
-        vdec);
-
-    return 0;
-}
