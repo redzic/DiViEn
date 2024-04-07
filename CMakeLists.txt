@@ -23,11 +23,12 @@ option(CONFIG_MSYS_UCRT64 "Enable config for building on msys64 with ucrt64" OFF
 if(ENABLE_IO_URING)
   add_definitions(-DASIO_HAS_IO_URING=1)
   add_definitions(-DASIO_DISABLE_EPOLL=1)
-  endif()
-  
+endif()
+
 if (CONFIG_MSYS_UCRT64)
   add_definitions(-DWINVER=0x0A00)
   add_definitions(-D_WIN32_WINNT=0x0A00)
+  set(CMAKE_NO_SYSTEM_FROM_IMPORTED 1)
 endif()
 
 # add_compile_options(-fsanitize=undefined -fsanitize=address -fsanitize=bounds -fsanitize=unsigned-integer-overflow  -fsanitize=local-bounds -fsanitize=signed-integer-overflow,null,alignment -fno-sanitize-recover=null -fsanitize-trap=alignment -fno-omit-frame-pointer)

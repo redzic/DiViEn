@@ -1892,6 +1892,7 @@ int main(int argc, char* argv[]) {
         return -1;
     }
 
+#if defined(__unix__)
     // TODO: put this behind some defines. Not for windows.
     struct sigaction sigIntHandler {};
 
@@ -1901,6 +1902,7 @@ int main(int argc, char* argv[]) {
     sigaction(SIGINT, &sigIntHandler, nullptr);
 
     av_log_set_callback(avlog_do_nothing);
+#endif
 
     // ok now we have our actual TCP server/client setup here.
     // next step AFTER this is to setup async
