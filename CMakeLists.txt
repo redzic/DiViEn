@@ -66,9 +66,7 @@ if(ENABLE_IO_URING)
 endif()
 
 if(CONFIG_MSYS_UCRT64)
-target_link_libraries( DiViEn - )
   target_link_libraries( DiViEn libavdevice libavfilter libavformat libavcodec libswresample libswscale libavutil )
-  # wsock is tcp stuff for ASIO
   target_link_libraries( DiViEn -lstdc++ wsock32 ws2_32)
 else()
   target_link_libraries( DiViEn PkgConfig::LIBAV )
