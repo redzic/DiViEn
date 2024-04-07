@@ -9,7 +9,9 @@
 #include <pthread.h>
 #include <string_view>
 #include <unistd.h>
+#include <utility>
 #include <variant>
+#include <vector>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -54,12 +56,13 @@ struct DecoderCreationError {
 
 // maybe add ctrl+C interrupt that just stops and flushes all packets so far?
 
-constexpr size_t CHUNK_FRAME_SIZE = 60;
-constexpr size_t NUM_WORKERS = 4;
-constexpr size_t THREADS_PER_WORKER = 4;
+// constexpr size_t CHUNK_FRAME_SIZE = 60;
+// constexpr size_t NUM_WORKERS = 4;
+// constexpr size_t THREADS_PER_WORKER = 4;
 
-constexpr size_t FRAMEBUF_SIZE = CHUNK_FRAME_SIZE * NUM_WORKERS;
-using FrameBuf = std::array<AVFrame*, FRAMEBUF_SIZE>;
+// constexpr size_t FRAMEBUF_SIZE = CHUNK_FRAME_SIZE * NUM_WORKERS;
+// using FrameBuf = std::array<AVFrame*, FRAMEBUF_SIZE>;
+using FrameBuf = std::vector<AVFrame*>;
 
 // yeah so even if you override the destructor, the other destructors
 // still run afterward which is good.
@@ -136,15 +139,20 @@ struct DecodeContext {
     // format context and wrap that one inside here
     // Takes ownership of the framebuf.
     // Be very careful when calling this constructor!
-    DecodeContext(AVFormatContext* demuxer_, AVCodecContext* decoder_,
-                  AVPacket* pkt_, FrameBuf framebuf_, int vindex)
-        : demuxer(demuxer_), pkt(pkt_), decoder(decoder_), framebuf(framebuf_),
-          video_index(vindex) {}
+    explicit DecodeContext(AVFormatContext* demuxer_, AVCodecContext* decoder_,
+                           AVPacket* pkt_, int vindex,
+                           unsigned int framebuf_size)
+        : demuxer(demuxer_), pkt(pkt_), decoder(decoder_), video_index(vindex) {
+        // TODO: don't use vector for this.
+        for (size_t i = 0; i < framebuf_size; i++) {
+            framebuf.push_back(av_frame_alloc());
+        }
+    }
 
     // Open file and initialize video decoder.
     // TODO switch to std::expected
     [[nodiscard]] static std::variant<DecodeContext, DecoderCreationError>
-    open(const char* url);
+    open(const char* url, unsigned int framebuf_size);
 };
 
 // how do you make a static allocation?

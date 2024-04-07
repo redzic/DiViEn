@@ -50,7 +50,7 @@ fix_broken_segments(unsigned int num_segments,
         DvAssert(concat_segments(low, high, buf.data(), sd) == 0);
 
         // TODO put this in a demuxer class instead.
-        auto dc = DecodeContext::open(buf.data());
+        auto dc = DecodeContext::open(buf.data(), 1);
         // TODO remove this call because it is just a sanity check. Or add
         // option to check that is not on by default.
         auto res = count_video_packets(std::get<DecodeContext>(dc));
@@ -79,7 +79,7 @@ fix_broken_segments(unsigned int num_segments,
         // TODO use DemuxerContext once that works properly
         // So that we don't have to waste time initializing a decoder when
         // we don't need one.
-        auto vdec = DecodeContext::open(fpath.data());
+        auto vdec = DecodeContext::open(fpath.data(), 1);
         // TODO make sure with all this stuff everything correctly gets
         // closed and stuff
         // TODO error handling: access variant properly.

@@ -148,8 +148,11 @@ struct EncodeLoopState {
     std::atomic<uint32_t> nb_frames_done{};
     std::atomic<uint32_t> nb_threads_done{};
 
+    // Should never be modified.
+    unsigned int num_workers;
+
     AlwaysInline bool all_workers_finished() {
-        return this->nb_threads_done == NUM_WORKERS;
+        return this->nb_threads_done == this->num_workers;
     }
 };
 
@@ -279,13 +282,13 @@ struct EncoderContext {
 
     // TODO proper error handling, return std::expected
     // caller needs to ensure they only call this once
-    void initialize_codec(AVFrame* frame) {
+    void initialize_codec(AVFrame* frame, unsigned int n_threads) {
         const auto* codec = avcodec_find_encoder_by_name(ENCODER_NAME);
         avcc = avcodec_alloc_context3(codec);
         DvAssert(avcc);
         pkt = av_packet_alloc();
         DvAssert(pkt);
-        avcc->thread_count = THREADS_PER_WORKER;
+        avcc->thread_count = n_threads;
         // arbitrary values
         avcc->time_base = (AVRational){1, 25};
         avcc->framerate = (AVRational){25, 1};
@@ -320,11 +323,11 @@ struct EncoderContext {
 };
 
 int encode_frames(const char* file_name, std::span<AVFrame*> frame_buffer,
-                  EncodeLoopState& state) {
+                  EncodeLoopState& state, unsigned int n_threads) {
     DvAssert(!frame_buffer.empty());
 
     EncoderContext encoder;
-    encoder.initialize_codec(frame_buffer[0]);
+    encoder.initialize_codec(frame_buffer[0], n_threads);
 
     // C-style IO is needed for binary size to not explode on Windows with
     // static linking
@@ -346,13 +349,13 @@ int encode_frames(const char* file_name, std::span<AVFrame*> frame_buffer,
 }
 
 int encode_chunk(unsigned int chunk_idx, std::span<AVFrame*> framebuf,
-                 EncodeLoopState& state) {
+                 EncodeLoopState& state, unsigned int n_threads) {
     std::array<char, 64> buf{};
 
     // this should write null terminator
     (void)snprintf(buf.data(), buf.size(), "file %d.mp4", chunk_idx);
 
-    return encode_frames(buf.data(), framebuf, state);
+    return encode_frames(buf.data(), framebuf, state, n_threads);
 }
 
 struct FrameAccurateWorkItem {
@@ -403,7 +406,7 @@ void encode_frame_range(FrameAccurateWorkItem& data, const char* ofname) {
         printf("=========== NEW SUBCHUNK. OPENING %s FOR READING.\n",
                input_fname.data());
 
-        auto dres = DecodeContext::open(input_fname.data());
+        auto dres = DecodeContext::open(input_fname.data(), 0);
 
         // perhaps we could initialize all these decoders at the same time...
         // to save time.
@@ -428,7 +431,8 @@ void encode_frame_range(FrameAccurateWorkItem& data, const char* ofname) {
                             // first iteration of loop
                             DvAssert(decode_next(dc, frame) == 0);
                             if (nf == 0) {
-                                encoder.initialize_codec(frame);
+                                // TODO use proper amount of threads
+                                encoder.initialize_codec(frame, 1);
                                 enc_was_init = true;
                             }
                             av_frame_unref(frame);
@@ -444,7 +448,7 @@ void encode_frame_range(FrameAccurateWorkItem& data, const char* ofname) {
 
                         AVFrame* frame = av_frame_alloc();
 
-                        int ret;
+                        int ret = 0;
                         if ((ret = decode_next(dc, frame)) != 0) {
                             printf("Decoder unexpectedly returned error: %s\n",
                                    av_strerr(ret).data());
@@ -452,7 +456,8 @@ void encode_frame_range(FrameAccurateWorkItem& data, const char* ofname) {
                         }
 
                         if (!enc_was_init) [[unlikely]] {
-                            encoder.initialize_codec(frame);
+                            // TODO use proper amoutn of threads
+                            encoder.initialize_codec(frame, 1);
                             enc_was_init = true;
                         }
 
@@ -486,11 +491,13 @@ void encode_frame_range(FrameAccurateWorkItem& data, const char* ofname) {
 }
 
 // framebuf is start of frame buffer that worker can use
+// TODO pass n_threads and chunk size in with some shared state
 int worker_thread(unsigned int worker_id, DecodeContext& decoder,
-                  EncodeLoopState& state) {
+                  EncodeLoopState& state, unsigned int chunk_frame_size,
+                  unsigned int n_threads) {
     while (true) {
-        for (size_t i = 0; i < CHUNK_FRAME_SIZE; i++) {
-            size_t idx = worker_id * CHUNK_FRAME_SIZE + i;
+        for (size_t i = 0; i < chunk_frame_size; i++) {
+            size_t idx = (size_t)worker_id * chunk_frame_size + i;
             if (avframe_has_buffer(decoder.framebuf[idx])) {
                 DvAssert(av_frame_make_writable(decoder.framebuf[idx]) == 0);
             }
@@ -503,8 +510,8 @@ int worker_thread(unsigned int worker_id, DecodeContext& decoder,
         state.global_decoder_mutex.lock();
 
         // decode CHUNK_FRAME_SIZE frames into frame buffer
-        int frames = run_decoder(decoder, worker_id * CHUNK_FRAME_SIZE,
-                                 CHUNK_FRAME_SIZE);
+        int frames = run_decoder(decoder, (size_t)worker_id * chunk_frame_size,
+                                 chunk_frame_size);
 
         // error decoding
         if (frames <= 0) {
@@ -524,11 +531,12 @@ int worker_thread(unsigned int worker_id, DecodeContext& decoder,
 
         // a little sketchy but in theory this should be fine
         // since framebuf is never modified
-        int ret = encode_chunk(
-            chunk_idx,
-            {decoder.framebuf.data() + (worker_id * CHUNK_FRAME_SIZE),
-             (size_t)frames},
-            state);
+        int ret =
+            encode_chunk(chunk_idx,
+                         {decoder.framebuf.data() +
+                              ((size_t)worker_id * (size_t)chunk_frame_size),
+                          (size_t)frames},
+                         state, n_threads);
 
         if (ret != 0) {
             // in theory... this shouldn't need to happen as this is an encoding
@@ -605,13 +613,17 @@ void raw_concat_files(const char* out_filename, unsigned int num_files,
 // There's some kind of stalling going on here.
 // TODO make option to test standalone encoder.
 // There's only supposed to be 487 frames on 2_3.
-void main_encode_loop(const char* out_filename, DecodeContext& d_ctx) {
+void main_encode_loop(const char* out_filename, DecodeContext& d_ctx,
+                      unsigned int num_workers, unsigned int chunk_frame_size,
+                      unsigned int n_threads) {
     // uh... we really need a safe way to do this and stuff
     // this is really bad... just assuming enough frames are
     // available
     printf("Writing encoded output to '%s'\n", out_filename);
 
+    // TODO: make explicit constructor for this
     EncodeLoopState state{};
+    state.num_workers = num_workers;
 
     auto start = now();
 
@@ -619,18 +631,18 @@ void main_encode_loop(const char* out_filename, DecodeContext& d_ctx) {
     // even if we have dynamic workers, I believe we
     // can use alloca. Not really totally ideal but,
     // whatever. Or just array with max capacity.
-    // std::vector<std::thread> thread_vector{};
-    // thread_vector.reserve(NUM_WORKERS);
-    std::array<std::thread, NUM_WORKERS> thread_vector;
+    std::vector<std::thread> thread_vector{};
+    thread_vector.reserve(num_workers);
 
     // spawn worker threads
-    for (unsigned int i = 0; i < NUM_WORKERS; i++) {
+    for (unsigned int i = 0; i < num_workers; i++) {
         // TODO I think it's theoretically possible
         // that constructing the threads fail, in which case
         // the memory needs to be cleaned up differently (I think).
         // Since otherwise we'd be destructing unallocated objects.
-        new (&thread_vector[i])
-            std::thread(&worker_thread, i, std::ref(d_ctx), std::ref(state));
+        thread_vector.emplace_back(&worker_thread, i, std::ref(d_ctx),
+                                   std::ref(state), chunk_frame_size,
+                                   n_threads);
     }
 
     printf("frame= 0  (0 fps)\n");
@@ -719,7 +731,7 @@ void main_encode_loop(const char* out_filename, DecodeContext& d_ctx) {
         printf(ERASE_LINE_ANSI "frame= %d  (%s fps avg, %s fps curr)\n",
                n_frames, avg_fps_fmt.data(), local_fps_fmt.data());
 
-        static_assert(NUM_WORKERS >= 1);
+        // DvAssert(NUM_WORKERS >= 1);
 
         if (state.all_workers_finished()) {
             break;
@@ -1840,12 +1852,47 @@ void run_client_full() {
     io_context.run();
 }
 
+int try_parse_uint(unsigned int& result, const char* sp,
+                   std::string_view argname) {
+    std::string_view str = sp;
+    unsigned int value = 0;
+    auto [ptr, ec] =
+        std::from_chars(str.data(), str.data() + str.size(), value);
+
+    if (ec == std::errc()) {
+        result = value;
+        return 0;
+    } else if (ec == std::errc::invalid_argument) {
+        printf("DiViEn: error: argument for %.*s: invalid argument\n",
+               (int)argname.size(), argname.data());
+    } else if (ec == std::errc::result_out_of_range) {
+        printf("DiViEn: error: argument for %.*s: value out of range\n",
+               (int)argname.size(), argname.data());
+    }
+    return -1;
+}
+
 int main(int argc, char* argv[]) {
     if (argc < 2) {
-        printf("DiViEn: must specify at least 2 args.\n");
+        // clang-format off
+        w_err("DiViEn: must specify at least 2 args.\n"
+              "Usage: ./DiViEn <mode> <args>\n"
+              "Available modes:\n"
+              "    server <video> - Run centralized server for distributed encoding (WARNING: NOT FULLY FUNCTIONAL)\n"
+              "    client - Run client that connects to DiViEn server instance (WARNING: NOT FULLY FUNCTIONAL)\n"
+              "    standalone - Encode input video locally\n"
+              "       args:\n"
+              "         -i      <input_path>      Path to input video to encode [required]\n"
+              "         -w      <num_workers>     Set number of workers (parallel encoder instances)\n"
+              "         -tpw    <num_threads>     Set number of threads per worker\n"
+              "         -bsize  <num_frames>      Set frame buffer size (chunk size) for each worker\n"
+              );
+        // clang-format on
+
         return -1;
     }
 
+    // TODO: put this behind some defines. Not for windows.
     struct sigaction sigIntHandler {};
 
     sigIntHandler.sa_handler = my_handler;
@@ -1860,12 +1907,13 @@ int main(int argc, char* argv[]) {
     // so that we can handle multiple clients at once easily.
     // Or at least multithreading or whatever.
     // Honestly yeah let's just use async.
+    DvAssert(argc >= 2);
     auto mode = std::string_view(argv[1]);
     try {
 
         if (mode == "server") {
             if (argc < 3) {
-                printf(
+                w_err(
                     "DiViEn: must specify the input video for server mode.\n");
                 return -1;
             }
@@ -1883,19 +1931,126 @@ int main(int argc, char* argv[]) {
             run_client_full();
         } else if (mode == "standalone") {
             if (argc < 3) {
-                printf(
+                w_err(
                     "Insufficient arguments specified for standalone mode.\n");
                 return -1;
             }
-            printf(
-                "Using %zu workers (%zu threads per worker), chunk size = %zu "
-                "frames per worker\nEncoder: " ENCODER_NAME "\n",
-                NUM_WORKERS, THREADS_PER_WORKER, CHUNK_FRAME_SIZE);
 
-            auto vdec = DecodeContext::open(argv[2]);
+            // We are only allowed to have one input path.
+            // TODO: consolidate this code
+            static constexpr std::string_view possible_args[] = {
+                "-i", "-w", "-tpw", "-bsize"};
+            size_t arg_errmsg = 0;
+
+            const char* input_path_s = nullptr;
+            const char* num_workers_s = nullptr;
+            const char* threads_per_worker_s = nullptr;
+            const char* framebuf_size_s = nullptr;
+
+            DvAssert(argc >= 3);
+            // parse the rest of the options here
+            for (size_t arg_i = 2; arg_i < (size_t)argc; arg_i++) {
+
+                // this is ugly but at least it works
+
+#define LENGTH_CHECK(idx_value, store_variable)                                \
+    {                                                                          \
+        if (arg_i + 1 >= (size_t)argc) {                                       \
+            arg_errmsg = (idx_value);                                          \
+            goto length_fail;                                                  \
+        }                                                                      \
+        store_variable = argv[arg_i + 1];                                      \
+        arg_i++;                                                               \
+        continue;                                                              \
+    }
+
+                auto arg_sv = std::string_view(argv[arg_i]);
+                // TODO: deduplicate code somehow?
+                // TODO: perhaps we should detect incorrect command line/missing
+                // values by checking the next argument is another command.
+                // TODO: perhaps a deduplication technique would be to store
+                // the variables in an array of strings as well, so all
+                // information about the option comes from the same index.
+                if (arg_sv == possible_args[0]) {
+                    LENGTH_CHECK(0, input_path_s);
+                } else if (arg_sv == possible_args[1]) {
+                    LENGTH_CHECK(1, num_workers_s);
+                } else if (arg_sv == possible_args[2]) {
+                    LENGTH_CHECK(2, threads_per_worker_s);
+                } else if (arg_sv == possible_args[3]) {
+                    LENGTH_CHECK(3, framebuf_size_s);
+                } else {
+                    printf("DiViEn: Unrecognized command-line option '%.*s'.\n",
+                           (int)arg_sv.size(), arg_sv.data());
+                    return -1;
+                }
+
+                continue;
+            length_fail:
+                printf("DiViEn: No argument provided for %.*s.\n",
+                       (int)possible_args[arg_errmsg].size(),
+                       possible_args[arg_errmsg].data());
+
+                return -1;
+            }
+
+            if (input_path_s == nullptr) {
+                printf("DiViEn: No input path provided. Please specify the "
+                       "input path with -i.\n");
+                return -1;
+            }
+
+#define PARSE_OPTIONAL_ARG(data_var, string_var, arg_name_macro)               \
+    {                                                                          \
+        if ((string_var) != nullptr) {                                         \
+            if (try_parse_uint(data_var, string_var, arg_name_macro) < 0) {    \
+                return -1;                                                     \
+            }                                                                  \
+        }                                                                      \
+    }
+
+            // default values
+            unsigned int num_workers = 4;
+            unsigned int threads_per_worker = 4;
+            unsigned int chunk_size = 60;
+
+            PARSE_OPTIONAL_ARG(num_workers, num_workers_s, "-w");
+            // perhaps just rename this option -threads?
+            PARSE_OPTIONAL_ARG(threads_per_worker, threads_per_worker_s,
+                               "-tpw");
+            PARSE_OPTIONAL_ARG(chunk_size, framebuf_size_s, "-bsize");
+
+            // Now we need to validate the input we received.
+            // TODO: move everything for CLI parsing into its own function.
+
+            // TODO: we need to assert what was null and what wasn't.
+
+            DvAssert(input_path_s != nullptr);
+
+            printf("Using input path '%s'\n", input_path_s);
+
+            // TODO rename variables to be less confusing
+            printf("Using %u workers (%u threads per worker), chunk size "
+                   "= %u "
+                   "frames per worker\nEncoder: " ENCODER_NAME "\n",
+                   num_workers, threads_per_worker, chunk_size);
+            // TODO make sure this doesn't throw exceptions.
+            auto vdec =
+                DecodeContext::open(input_path_s, chunk_size * num_workers);
+            if (std::holds_alternative<DecoderCreationError>(vdec)) {
+                auto err = std::get<DecoderCreationError>(vdec);
+                // TODO: make this function format into buffer or something, for
+                // more specific error messages on AVError. Need to deduplicate
+                // a bunch of code.
+                auto m = err.errmsg();
+                printf("Failed to open input file '%s': %.*s\n", input_path_s,
+                       (int)m.size(), m.data());
+                return -1;
+            }
 
             main_encode_loop("standalone_output.mp4",
-                             std::get<DecodeContext>(vdec));
+                             std::get<DecodeContext>(vdec), num_workers,
+                             chunk_size, threads_per_worker);
         } else {
             printf("unknown mode '%.*s'.\n", (int)mode.size(), mode.data());
         }
@@ -1989,7 +2144,7 @@ int main_unused(int argc, char* argv[]) {
 
     // TODO move all this to another function
 
-    auto vdec = DecodeContext::open(url);
+    auto vdec = DecodeContext::open(url, 1);
 
     // TODO use std::expected instead?
     std::visit(
@@ -1997,7 +2152,7 @@ int main_unused(int argc, char* argv[]) {
             using T = std::decay_t<decltype(arg)>;
 
             if constexpr (std::is_same_v<T, DecodeContext>) {
-                main_encode_loop("output.mp4", arg);
+                main_encode_loop("output.mp4", arg, 1, 60, 1);
 
             } else if constexpr (std::is_same_v<T, DecoderCreationError>) {
                 auto error = arg;

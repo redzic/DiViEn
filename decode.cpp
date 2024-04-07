@@ -8,7 +8,9 @@
 
 // std::variant<DecodeContext, DecoderCreationError>
 std::variant<DecodeContext, DecoderCreationError>
-DecodeContext::open(const char* url) {
+DecodeContext::open(const char* url, unsigned int framebuf_size) {
+    DvAssert(framebuf_size > 0);
+
     auto pkt = make_resource<AVPacket, av_packet_alloc, av_packet_free>();
 
     // this should work with the way smart pointers work right?
@@ -83,28 +85,14 @@ DecodeContext::open(const char* url) {
     // auto frame1 = make_resource<AVFrame, av_frame_alloc, av_frame_free>();
 
     // TODO properly clean up resources on alloc failure
-    FrameBuf frame_buffer{};
-
-    for (size_t curr_init = 0; curr_init < frame_buffer.size(); curr_init++) {
-        frame_buffer[curr_init] = av_frame_alloc();
-        if (frame_buffer[curr_init] == nullptr) [[unlikely]] {
-            // free previously allocated frames
-            // no need to call av_frame_free on current frame, since it's null.
-            for (size_t prev_alloc = 0; prev_alloc < curr_init; prev_alloc++) {
-                av_frame_free(&frame_buffer[prev_alloc]);
-            }
-            return DecoderCreationError{
-                .type = DecoderCreationError::AllocationFailure};
-        }
-    }
 
     return std::variant<DecodeContext, DecoderCreationError>{
         std::in_place_type<DecodeContext>,
         demuxer.release(),
         decoder.release(),
         pkt.release(),
-        frame_buffer,
-        stream_idx};
+        stream_idx,
+        framebuf_size};
 }
 
 // TODO use some kind of custom struct or whatever that forces you to check the
