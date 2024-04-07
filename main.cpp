@@ -1880,14 +1880,14 @@ int main(int argc, char* argv[]) {
         w_err("DiViEn: must specify at least 2 args.\n"
               "Usage: ./DiViEn <mode> <args>\n"
               "Available modes:\n"
-              "    server <video> - Run centralized server for distributed encoding (WARNING: NOT FULLY FUNCTIONAL)\n"
-              "    client - Run client that connects to DiViEn server instance (WARNING: NOT FULLY FUNCTIONAL)\n"
-              "    standalone - Encode input video locally\n"
-              "       args:\n"
-              "         -i      <input_path>      Path to input video to encode [required]\n"
-              "         -w      <num_workers>     Set number of workers (parallel encoder instances)\n"
-              "         -tpw    <num_threads>     Set number of threads per worker\n"
-              "         -bsize  <num_frames>      Set frame buffer size (chunk size) for each worker\n"
+              "    server <video>   Run centralized server for distributed encoding (WARNING: NOT FULLY FUNCTIONAL)\n"
+              "    client           Run client that connects to DiViEn server instance (WARNING: NOT FULLY FUNCTIONAL)\n"
+              "    (standalone)     Encode input video locally. This option is implied if no mode is specified.\n"
+              "        args:\n"
+              "          -i      <input_path>      Path to input video to encode [required]\n"
+              "          -w      <num_workers>     Set number of workers (parallel encoder instances)\n"
+              "          -tpw    <num_threads>     Set number of threads per worker\n"
+              "          -bsize  <num_frames>      Set frame buffer size (chunk size) for each worker\n"
               );
         // clang-format on
 
@@ -1932,12 +1932,8 @@ int main(int argc, char* argv[]) {
             // encode_frame_range(work, "random.mp4");
 
             run_client_full();
-        } else if (mode == "standalone") {
-            if (argc < 3) {
-                w_err("DiViEn: Insufficient arguments specified for standalone "
-                      "mode.\n");
-                return -1;
-            }
+        } else {
+            // interpret as standalone mode otherwise
 
             // We are only allowed to have one input path.
             // TODO: consolidate this code
@@ -1952,7 +1948,7 @@ int main(int argc, char* argv[]) {
 
             DvAssert(argc >= 3);
             // parse the rest of the options here
-            for (size_t arg_i = 2; arg_i < (size_t)argc; arg_i++) {
+            for (size_t arg_i = 1; arg_i < (size_t)argc; arg_i++) {
 
                 // this is ugly but at least it works
 
@@ -1962,7 +1958,7 @@ int main(int argc, char* argv[]) {
             arg_errmsg = (idx_value);                                          \
             goto length_fail;                                                  \
         }                                                                      \
-        store_variable = argv[arg_i + 1];                                      \
+        (store_variable) = argv[arg_i + 1];                                    \
         arg_i++;                                                               \
         continue;                                                              \
     }
@@ -2033,10 +2029,12 @@ int main(int argc, char* argv[]) {
             printf("Using input path '%s'\n", input_path_s);
 
             // TODO rename variables to be less confusing
-            printf("Using %u workers (%u threads per worker), chunk size "
-                   "= %u "
-                   "frames per worker\nEncoder: " ENCODER_NAME "\n",
-                   num_workers, threads_per_worker, chunk_size);
+            printf(
+                "Using %u workers (%u threads per worker), chunk size "
+                "= %u "
+                "frames per worker\nRunning in standalone mode [" ENCODER_NAME
+                "]\n",
+                num_workers, threads_per_worker, chunk_size);
             // TODO make sure this doesn't throw exceptions.
             auto vdec =
                 DecodeContext::open(input_path_s, chunk_size * num_workers);
@@ -2054,8 +2052,6 @@ int main(int argc, char* argv[]) {
             main_encode_loop("standalone_output.mp4",
                              std::get<DecodeContext>(vdec), num_workers,
                              chunk_size, threads_per_worker);
-        } else {
-            printf("unknown mode '%.*s'.\n", (int)mode.size(), mode.data());
         }
 
     } catch (std::exception& e) {

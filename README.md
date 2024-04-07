@@ -30,10 +30,10 @@ cmake --build .
 
 ## Usage
 
-To run the local chunked encoder:
+To run the local chunked encoder (standalone mode):
 
 ```
-./DiViEn standalone -i <path/to/input.mp4>
+./DiViEn -i <path/to/input.mp4>
 ```
 
 The output will be in `standalone_output.mp4`.
