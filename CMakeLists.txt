@@ -26,6 +26,7 @@ if(ENABLE_IO_URING)
 endif()
 
 if (CONFIG_MSYS_UCRT64)
+  # Target Windows 10.
   add_definitions(-DWINVER=0x0A00)
   add_definitions(-D_WIN32_WINNT=0x0A00)
   set(CMAKE_NO_SYSTEM_FROM_IMPORTED 1)
@@ -36,30 +37,21 @@ endif()
 
 # required for no dependencies on Windows (other than ffmpeg shared libs)
 
-# compile options needed for self-contained binary
-# add_compile_options(-static-libstdc++ -static-libgcc -static)
-# add_link_options(-static-libstdc++ -static-libgcc -static)
-
 # Turning off exceptions causes the program to abort
 # if an exception is thrown.
 # add_compile_options(-fno-exceptions -fno-rtti)
 # add_link_options(-fno-exceptions -fno-rtti)
-
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(LIBAV REQUIRED IMPORTED_TARGET
-    libavdevice
-    libavfilter
-    libavformat
-    libavcodec
-    libswresample
-    libswscale
-    libavutil
-)
-
-
-# This is pretty hacky, but whatever.
-if(CONFIG_MSYS_UCRT64)
-  set_property(TARGET PkgConfig::LIBAV PROPERTY INTERFACE_INCLUDE_DIRECTORIES "/c/msys64/ucrt64/include/")
+if(NOT CONFIG_MSYS_UCRT64)
+  find_package(PkgConfig REQUIRED)
+  pkg_check_modules(LIBAV REQUIRED IMPORTED_TARGET
+      libavdevice
+      libavfilter
+      libavformat
+      libavcodec
+      libswresample
+      libswscale
+      libavutil
+  )
 endif()
 
 # TODO can we isolate the code so that we turn on exceptions
@@ -70,6 +62,14 @@ add_executable(DiViEn main.cpp decode.cpp segment.cpp)
 
 target_compile_options(DiViEn PRIVATE -Wall -Wextra -Wformat -Wno-c99-designator )
 if(ENABLE_IO_URING)
-    target_link_libraries( DiViEn uring )
+  target_link_libraries( DiViEn uring )
 endif()
-target_link_libraries( DiViEn PkgConfig::LIBAV )
+
+if(CONFIG_MSYS_UCRT64)
+target_link_libraries( DiViEn - )
+  target_link_libraries( DiViEn libavdevice libavfilter libavformat libavcodec libswresample libswscale libavutil )
+  # wsock is tcp stuff for ASIO
+  target_link_libraries( DiViEn -lstdc++ wsock32 ws2_32)
+else()
+  target_link_libraries( DiViEn PkgConfig::LIBAV )
+endif()

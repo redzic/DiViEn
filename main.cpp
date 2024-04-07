@@ -1892,16 +1892,15 @@ int main(int argc, char* argv[]) {
         return -1;
     }
 
+    av_log_set_callback(avlog_do_nothing);
+
 #if defined(__unix__)
-    // TODO: put this behind some defines. Not for windows.
     struct sigaction sigIntHandler {};
 
     sigIntHandler.sa_handler = my_handler;
     sigemptyset(&sigIntHandler.sa_mask);
     sigIntHandler.sa_flags = 0;
     sigaction(SIGINT, &sigIntHandler, nullptr);
-
-    av_log_set_callback(avlog_do_nothing);
 #endif
 
     // ok now we have our actual TCP server/client setup here.
