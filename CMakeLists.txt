@@ -15,9 +15,10 @@ set(CMAKE_COLOR_MAKEFILE TRUE)
 set(CMAKE_COLOR_DIAGNOSTICS ON)
 
 set(ENABLE_IO_URING OFF CACHE BOOL "Use io-uring for tcp on linux (default off)")
+set(CONFIG_MSYS_UCRT64 OFF CACHE BOOL "Enable config for building on msys64 with ucrt64")
 
-# Option to enable defining custom values
 option(ENABLE_IO_URING "Use io-uring for tcp on linux (default off)" OFF)
+option(CONFIG_MSYS_UCRT64 "Enable config for building on msys64 with ucrt64" OFF)
 
 if(ENABLE_IO_URING)
   add_definitions(-DASIO_HAS_IO_URING=1)
@@ -49,6 +50,12 @@ pkg_check_modules(LIBAV REQUIRED IMPORTED_TARGET
     libswscale
     libavutil
 )
+
+
+# This is pretty hacky, but whatever.
+if(CONFIG_MSYS_UCRT64)
+  set_property(TARGET PkgConfig::LIBAV PROPERTY INTERFACE_INCLUDE_DIRECTORIES "/c/msys64/ucrt64/include/")
+endif()
 
 # TODO can we isolate the code so that we turn on exceptions
 # for only part of the code? like the part that deals with ASIO.

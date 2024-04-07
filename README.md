@@ -33,17 +33,10 @@ cmake --build .
 To run the local chunked encoder:
 
 ```
-./DiViEn standalone <path/to/input.mp4>
+./DiViEn standalone -i <path/to/input.mp4>
 ```
 
 The output will be in `standalone_output.mp4`.
-
-A proper CLI will be implemented later.
-
-Note that this might be slow on your machine because of the default amount of workers. (See: Current Limitations.)
-For now, please edit the variables in the source code and recompile to use different amounts of workers and threads (See the file decode.h, variables NUM_WORKERS, THREADS_PER_WORKER, and CHUNK_FRAME_SIZE). Like I said I will get to implementing a proper CLI later.
-
-The same applies for encoding parameters.
 
 The output file may not be fully compatible with some video players at the moment due to
 a lack of proper timestamps being set. This should be fixed in the future.
@@ -52,8 +45,6 @@ Distributed encoding currently is implemented in a basic form, but contains bugs
 
 ### Current Limitations 
 
-- Many things are hard coded into the source code,
-like the number of workers, frame buffer size, and encoding
-parameters. This will be changed as a proper CLI is implemented.
-
 - Currently, only fixed sized chunks are supported. Scene detection is not currently implemented.
+
+- Encoding parameters are currently hardcoded into the program. This will be fixed later.
