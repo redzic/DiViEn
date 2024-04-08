@@ -2040,7 +2040,7 @@ int main(int argc, char* argv[]) {
             // default values
             unsigned int num_workers = 4;
             unsigned int threads_per_worker = 4;
-            unsigned int chunk_size = 60;
+            unsigned int chunk_size = 250;
 
             PARSE_OPTIONAL_ARG(num_workers, num_workers_s, "-w");
             // perhaps just rename this option -threads?

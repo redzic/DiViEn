@@ -7,8 +7,8 @@ project(DiViEn)
 
 
 set(CMAKE_CXX_STANDARD 23)
-# set(CMAKE_BUILD_TYPE Release)
-set(CMAKE_BUILD_TYPE Debug)
+set(CMAKE_BUILD_TYPE Release)
+# set(CMAKE_BUILD_TYPE Debug)
 
 set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
 set(CMAKE_COLOR_MAKEFILE TRUE)
@@ -33,8 +33,8 @@ if (CONFIG_MSYS_UCRT64)
   set(CMAKE_NO_SYSTEM_FROM_IMPORTED 1)
 endif()
 
-add_compile_options(-fsanitize=undefined -fsanitize=address -fsanitize=bounds -fsanitize=unsigned-integer-overflow  -fsanitize=local-bounds -fsanitize=signed-integer-overflow,null,alignment -fno-sanitize-recover=null -fsanitize-trap=alignment -fno-omit-frame-pointer)
-add_link_options(-fsanitize=undefined -fsanitize=address -fsanitize=bounds -fsanitize=unsigned-integer-overflow  -fsanitize=local-bounds -fsanitize=signed-integer-overflow,null,alignment -fno-sanitize-recover=null -fsanitize-trap=alignment -fno-omit-frame-pointer)
+# add_compile_options(-fsanitize=undefined -fsanitize=address -fsanitize=bounds -fsanitize=unsigned-integer-overflow  -fsanitize=local-bounds -fsanitize=signed-integer-overflow,null,alignment -fno-sanitize-recover=null -fsanitize-trap=alignment -fno-omit-frame-pointer)
+# add_link_options(-fsanitize=undefined -fsanitize=address -fsanitize=bounds -fsanitize=unsigned-integer-overflow  -fsanitize=local-bounds -fsanitize=signed-integer-overflow,null,alignment -fno-sanitize-recover=null -fsanitize-trap=alignment -fno-omit-frame-pointer)
 
 # required for no dependencies on Windows (other than ffmpeg shared libs)
 
