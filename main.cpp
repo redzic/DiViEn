@@ -2054,7 +2054,15 @@ int main(int argc, char* argv[]) {
             unsigned int threads_per_worker = 4;
             unsigned int chunk_size = 250;
 
+            // TODO deduplicate code somehow
+            // Does assigning string literal to variable give that
+            // proper (static) lifetime? Need to know for macro purpose.
+            // Ideally we assign to string_view though.
             PARSE_OPTIONAL_ARG(num_workers, num_workers_s, "-w");
+            if (num_workers == 0) [[unlikely]] {
+                w_err(DIVIEN ": Error: -w cannot be 0\n");
+                return -1;
+            }
             // perhaps just rename this option -threads?
             PARSE_OPTIONAL_ARG(threads_per_worker, threads_per_worker_s,
                                "-tpw");
