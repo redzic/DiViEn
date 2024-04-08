@@ -1909,6 +1909,11 @@ int main(int argc, char* argv[]) {
         return -1;
     }
 
+    OnReturn _flusher([]() {
+        (void)fflush(stdout);
+        (void)fflush(stderr);
+    });
+
 #if defined(__unix__)
     struct sigaction sigIntHandler {};
 
