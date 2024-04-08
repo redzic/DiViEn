@@ -296,7 +296,7 @@ AVPixelFormat av_pix_fmt_supported_version(AVPixelFormat pix_fmt) {
 // we need to make a version of this that doesn't just encode everything and
 // flush the output at once
 
-#define ENCODER_NAME "libx264"
+#define ENCODER_NAME "libaom-av1"
 
 struct EncoderContext {
     AVCodecContext* avcc{nullptr};
@@ -327,12 +327,12 @@ struct EncoderContext {
             av_pix_fmt_supported_version((AVPixelFormat)frame->format);
 
         // X264/5:
-        av_opt_set(avcc->priv_data, "crf", "30", 0);
-        av_opt_set(avcc->priv_data, "preset", "ultrafast", 0);
+        // av_opt_set(avcc->priv_data, "crf", "30", 0);
+        // av_opt_set(avcc->priv_data, "preset", "ultrafast", 0);
         // AOM:
-        // av_opt_set(avcc->priv_data, "cpu-used", "6", 0);
-        // av_opt_set(avcc->priv_data, "end-usage", "q", 0);
-        // av_opt_set(avcc->priv_data, "cq-level", "30", 0);
+        av_opt_set(avcc->priv_data, "cpu-used", "6", 0);
+        av_opt_set(avcc->priv_data, "end-usage", "q", 0);
+        av_opt_set(avcc->priv_data, "cq-level", "30", 0);
         // av_opt_set(avcc->priv_data, "enable-qm", "1", 0);
 
         int ret = avcodec_open2(avcc, codec, nullptr);
