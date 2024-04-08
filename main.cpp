@@ -1887,6 +1887,7 @@ int try_parse_uint(unsigned int& result, const char* sp,
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
+        // TODO print this as help also
         // clang-format off
         w_err(DIVIEN ": must specify at least 2 args.\n"
               " Usage: ./DiViEn <mode> <args>\n\n"
@@ -1899,6 +1900,9 @@ int main(int argc, char* argv[]) {
               "          -w      <num_workers>     Set number of workers (parallel encoder instances)\n"
               "          -tpw    <num_threads>     Set number of threads per worker\n"
               "          -bsize  <num_frames>      Set frame buffer size (chunk size) for each worker\n"
+              "          -c:v    <codec_name>      Set codec for encoding [default: libx264]\n"
+              "          -ff     <args> --         List of arguments to pass, delimited by -- \n"
+              "             ex:                     -ff -crf 30 -preset veryfast\n"
               );
         // clang-format on
 

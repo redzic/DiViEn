@@ -32,8 +32,16 @@ cmake --build .
 
 To run the local chunked encoder (standalone mode):
 
+Basic usage:
+
 ```
 ./DiViEn -i <path/to/input.mp4>
+```
+
+Specify arguments (e.g., 8 workers, 4 threads per worker, libaom-av1, custom encoding params):
+
+```
+./DiViEn -i <path/to/input.mp4> -w 8 -c:v libaom-av1 -ff -crf 30 -cpu-used 6 -- -tpw 4
 ```
 
 The output will be in `standalone_output.mp4`.
@@ -46,5 +54,3 @@ Distributed encoding currently is implemented in a basic form, but contains bugs
 ### Current Limitations 
 
 - Currently, only fixed sized chunks are supported. Scene detection is not currently implemented.
-
-- Encoding parameters are currently hardcoded into the program. This will be fixed later.
