@@ -700,7 +700,7 @@ chunked_encode_loop(EncoderOpts e_opts, const char* in_filename,
                                    std::ref(d_ctx), std::ref(state), e_opts);
     }
 
-    printf("frame= 0  (0 fps)\n");
+    printf("frame= 0\n");
 
     auto compute_fps = [](uint32_t n_frames, int64_t time_ms) -> double {
         if (time_ms <= 0) [[unlikely]] {
