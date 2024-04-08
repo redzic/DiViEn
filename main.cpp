@@ -332,8 +332,9 @@ struct EncoderContext {
         // DvAssert(av_opt_set(avcc->priv_data, "preset", "ultrafast", 0) == 0);
         // AOM:
         DvAssert(av_opt_set(avcc->priv_data, "cpu-used", "6", 0) == 0);
-        DvAssert(av_opt_set(avcc->priv_data, "end-usage", "q", 0) == 0);
-        DvAssert(av_opt_set(avcc->priv_data, "cq-level", "30", 0) == 0);
+        DvAssert(av_opt_set(avcc->priv_data, "crf", "30", 0) == 0);
+        DvAssert(av_opt_set(avcc->priv_data, "aom-params", "cq-level=30", 0) ==
+                 0);
         // DvAssert(av_opt_set(avcc->priv_data, "enable-qm", "1", 0));
 
         int ret = avcodec_open2(avcc, codec, nullptr);
