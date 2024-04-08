@@ -327,13 +327,13 @@ struct EncoderContext {
             av_pix_fmt_supported_version((AVPixelFormat)frame->format);
 
         // X264/5:
-        // av_opt_set(avcc->priv_data, "crf", "30", 0);
-        // av_opt_set(avcc->priv_data, "preset", "ultrafast", 0);
+        // DvAssert(av_opt_set(avcc->priv_data, "crf", "30", 0) == 0);
+        // DvAssert(av_opt_set(avcc->priv_data, "preset", "ultrafast", 0) == 0);
         // AOM:
-        av_opt_set(avcc->priv_data, "cpu-used", "6", 0);
-        av_opt_set(avcc->priv_data, "end-usage", "q", 0);
-        av_opt_set(avcc->priv_data, "cq-level", "30", 0);
-        // av_opt_set(avcc->priv_data, "enable-qm", "1", 0);
+        DvAssert(av_opt_set(avcc->priv_data, "cpu-used", "6", 0));
+        DvAssert(av_opt_set(avcc->priv_data, "end-usage", "q", 0));
+        DvAssert(av_opt_set(avcc->priv_data, "cq-level", "30", 0));
+        // DvAssert(av_opt_set(avcc->priv_data, "enable-qm", "1", 0));
 
         int ret = avcodec_open2(avcc, codec, nullptr);
         DvAssert(ret == 0 && "Failed to open encoder codec");
@@ -762,8 +762,6 @@ chunked_encode_loop(const char* in_filename, const char* out_filename,
         // terminal/pipe and don't print ERASE_LINE_ASCII if not a tty.
         printf(ERASE_LINE_ANSI "frame= %d  (%s fps avg, %s fps curr)\n",
                n_frames, avg_fps_fmt.data(), local_fps_fmt.data());
-
-        // DvAssert(NUM_WORKERS >= 1);
 
         if (state.all_workers_finished()) {
             break;
@@ -2046,6 +2044,10 @@ int main(int argc, char* argv[]) {
             // perhaps just rename this option -threads?
             PARSE_OPTIONAL_ARG(threads_per_worker, threads_per_worker_s,
                                "-tpw");
+            if (threads_per_worker == 0) [[unlikely]] {
+                w_err(DIVIEN ": Error: -tpw cannot be 0\n");
+                return -1;
+            }
             PARSE_OPTIONAL_ARG(chunk_size, framebuf_size_s, "-bsize");
             if (chunk_size == 0) [[unlikely]] {
                 // TODO enforce this in some other struct as well
@@ -2086,10 +2088,10 @@ int main(int argc, char* argv[]) {
             auto o_fname =
                 fs::path(input_path_s).filename().replace_extension();
             o_fname.concat("_divien_" ENCODER_NAME ".mp4");
-            DvAssert(chunked_encode_loop(input_path_s, o_fname.c_str(),
-                                         std::get<DecodeContext>(vdec),
-                                         num_workers, chunk_size,
-                                         threads_per_worker) == 0);
+            DvAssert(chunked_encode_loop(
+                         input_path_s, o_fname.generic_string().c_str(),
+                         std::get<DecodeContext>(vdec), num_workers, chunk_size,
+                         threads_per_worker) == 0);
         }
 
     } catch (std::exception& e) {
