@@ -92,8 +92,8 @@ extern "C" {
 
 namespace {
 
-// #define ERASE_LINE_ANSI "\x1B[1A\x1B[2K" // NOLINT
-#define ERASE_LINE_ANSI "" // NOLINT
+#define ERASE_LINE_ANSI "\x1B[1A\x1B[2K" // NOLINT
+// #define ERASE_LINE_ANSI "" // NOLINT
 
 #define AlwaysInline __attribute__((always_inline)) inline
 
@@ -579,16 +579,6 @@ int worker_thread(std::string_view base_path, std::string_view prefix,
     }
 }
 
-void avlog_do_nothing(void* /* unused */, int /* level */,
-                      const char* /* szFmt */, va_list /* varg */) {}
-
-// so I mean as hack we could do this dumb shit
-// with checking the callback stuff...
-// void av_log_TEST_CALLBACK(void* ptr, int level, const char* fmt, va_list vl)
-// {
-//     printf("%s\n", fmt);
-// }
-
 // assume same naming convention
 // this is direct concatenation, nothing extra done to files.
 // hardcoded. TODO remove.
@@ -716,8 +706,9 @@ chunked_encode_loop(const char* in_filename, const char* out_filename,
         // pointer or something? It probably won't actually end up being faster
         // due to overhead tho.
         auto avg_fps = compute_fps(n_frames, total_elapsed_ms);
+        // using 9.5 to align with rounding behavior of printf
         (void)snprintf(avg_fps_fmt.data(), avg_fps_fmt.size(),
-                       avg_fps < 10.0 ? "%.1f" : "%0.f", avg_fps);
+                       avg_fps < 9.5 ? "%.1f" : "%0.f", avg_fps);
 
         // print progress
         // TODO I guess this should detect if we are outputting to a
@@ -1882,8 +1873,6 @@ int main(int argc, char* argv[]) {
         return -1;
     }
 
-    // av_log_set_callback(avlog_do_nothing);
-
 #if defined(__unix__)
     struct sigaction sigIntHandler {};
 
@@ -2047,8 +2036,10 @@ int main(int argc, char* argv[]) {
 
             auto& dc = std::get<DecodeContext>(vdec);
 
-            // DvAssert(dc.demuxer != nullptr);
+            DvAssert(dc.demuxer != nullptr);
             av_dump_format(dc.demuxer, dc.video_index, input_path_s, 0);
+
+            av_log_set_level(AV_LOG_WARNING);
 
             auto o_fname =
                 fs::path(input_path_s).filename().replace_extension();
