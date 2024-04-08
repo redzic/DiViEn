@@ -331,9 +331,9 @@ struct EncoderContext {
         // DvAssert(av_opt_set(avcc->priv_data, "crf", "30", 0) == 0);
         // DvAssert(av_opt_set(avcc->priv_data, "preset", "ultrafast", 0) == 0);
         // AOM:
-        DvAssert(av_opt_set(avcc->priv_data, "cpu-used", "6", 0));
-        DvAssert(av_opt_set(avcc->priv_data, "end-usage", "q", 0));
-        DvAssert(av_opt_set(avcc->priv_data, "cq-level", "30", 0));
+        DvAssert(av_opt_set(avcc->priv_data, "cpu-used", "6", 0) == 0);
+        DvAssert(av_opt_set(avcc->priv_data, "end-usage", "q", 0) == 0);
+        DvAssert(av_opt_set(avcc->priv_data, "cq-level", "30", 0) == 0);
         // DvAssert(av_opt_set(avcc->priv_data, "enable-qm", "1", 0));
 
         int ret = avcodec_open2(avcc, codec, nullptr);
@@ -2086,13 +2086,17 @@ int main(int argc, char* argv[]) {
                 return -1;
             }
 
+            auto& dc = std::get<DecodeContext>(vdec);
+
+            // DvAssert(dc.demuxer != nullptr);
+            // av_dump_format(dc.demuxer, dc.video_index, input_path_s, 0);
+
             auto o_fname =
                 fs::path(input_path_s).filename().replace_extension();
             o_fname.concat("_divien_" ENCODER_NAME ".mp4");
             DvAssert(chunked_encode_loop(
-                         input_path_s, o_fname.generic_string().c_str(),
-                         std::get<DecodeContext>(vdec), num_workers, chunk_size,
-                         threads_per_worker) == 0);
+                         input_path_s, o_fname.generic_string().c_str(), dc,
+                         num_workers, chunk_size, threads_per_worker) == 0);
         }
 
     } catch (std::exception& e) {
