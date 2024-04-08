@@ -92,8 +92,8 @@ extern "C" {
 
 namespace {
 
-#define ERASE_LINE_ANSI "\x1B[1A\x1B[2K" // NOLINT
-// #define ERASE_LINE_ANSI "" // NOLINT
+// #define ERASE_LINE_ANSI "\x1B[1A\x1B[2K" // NOLINT
+#define ERASE_LINE_ANSI "" // NOLINT
 
 #define AlwaysInline __attribute__((always_inline)) inline
 
@@ -679,7 +679,6 @@ chunked_encode_loop(const char* in_filename, const char* out_filename,
     }
 
     printf("frame= 0  (0 fps)\n");
-    uint32_t last_frames = 0;
 
     auto compute_fps = [](uint32_t n_frames, int64_t time_ms) -> double {
         if (time_ms <= 0) [[unlikely]] {
@@ -693,7 +692,6 @@ chunked_encode_loop(const char* in_filename, const char* out_filename,
     // TODO minimize size of these buffers
     // TODO I wonder if it's more efficient to join these buffers
     // into one. And use each half.
-    std::array<char, 32> local_fps_fmt;
     std::array<char, 32> avg_fps_fmt;
 
     while (true) {
@@ -701,21 +699,9 @@ chunked_encode_loop(const char* in_filename, const char* out_filename,
         // TODO: see if we can release this lock earlier.
         std::unique_lock<std::mutex> lk(state.cv_m);
 
-        // so for some reason this notify system isn't good enough
-        // for checking if all threads have completed.
-        auto local_start = now();
-        // TODO Is this guaranteed to deal with "spurious wakes"?
-        // The documentation does specfically say it can be woken spuriously.
-        // but that was for wait not wait_for.
-        auto status = state.cv.wait_for(lk, std::chrono::seconds(1));
-        // bruh where should we unlock this
-        // lk.unlock();
+        state.cv.wait_for(lk, std::chrono::seconds(1));
 
         auto n_frames = state.nb_frames_done.load();
-        auto frame_diff = n_frames - last_frames;
-        last_frames = n_frames;
-        // since we waited exactly 1 second, frame_diff is the fps,
-        // unless the status is no_timeout.
 
         auto local_now = now();
         auto total_elapsed_ms = dist_ms(start, local_now);
@@ -725,45 +711,19 @@ chunked_encode_loop(const char* in_filename, const char* out_filename,
         // Well this does work for avoiding extra waiting unnecessarily.
         // TODO simplify/optimize this code if possible
 
-        if (status == std::cv_status::no_timeout) [[unlikely]] {
-            // this means we didn't wait for the full time
-            auto elapsed_local_ms = dist_ms(local_start, local_now);
-            if (elapsed_local_ms > 0) [[likely]] {
-                auto local_fps = static_cast<int32_t>(
-                    compute_fps(frame_diff, elapsed_local_ms));
-                (void)snprintf(local_fps_fmt.data(), local_fps_fmt.size(), "%d",
-                               local_fps);
-            } else {
-                // write ? to buffer
-                // TODO convert everything to a better mechanism not involving
-                // null terminators and printf
-                // 2 bytes including null terminator
-                memcpy(local_fps_fmt.data(), "?", 2);
-            }
-        } else {
-            // we waited the full 1s
-            // TODO ensure it's actually 1s in case of spurious wakes
-            // auto local_fps = frame_diff;
-            (void)snprintf(local_fps_fmt.data(), local_fps_fmt.size(), "%d",
-                           frame_diff);
-        }
         // average fps from start of encoding process
         // TODO can we convert to faster loop with like boolean flag + function
         // pointer or something? It probably won't actually end up being faster
         // due to overhead tho.
-        if (total_elapsed_ms == 0) [[unlikely]] {
-            memcpy(avg_fps_fmt.data(), "?", 2);
-        } else [[likely]] {
-            auto avg_fps = compute_fps(n_frames, total_elapsed_ms);
-            (void)snprintf(avg_fps_fmt.data(), avg_fps_fmt.size(), "%.1f",
-                           avg_fps);
-        }
+        auto avg_fps = compute_fps(n_frames, total_elapsed_ms);
+        (void)snprintf(avg_fps_fmt.data(), avg_fps_fmt.size(),
+                       avg_fps < 10.0 ? "%.1f" : "%0.f", avg_fps);
 
         // print progress
         // TODO I guess this should detect if we are outputting to a
         // terminal/pipe and don't print ERASE_LINE_ASCII if not a tty.
-        printf(ERASE_LINE_ANSI "frame= %d  (%s fps avg, %s fps curr)\n",
-               n_frames, avg_fps_fmt.data(), local_fps_fmt.data());
+        printf(ERASE_LINE_ANSI "frame= %d  [%s fps]\n", n_frames,
+               avg_fps_fmt.data());
 
         if (state.all_workers_finished()) {
             break;
@@ -1922,7 +1882,7 @@ int main(int argc, char* argv[]) {
         return -1;
     }
 
-    av_log_set_callback(avlog_do_nothing);
+    // av_log_set_callback(avlog_do_nothing);
 
 #if defined(__unix__)
     struct sigaction sigIntHandler {};
@@ -2064,8 +2024,6 @@ int main(int argc, char* argv[]) {
 
             DvAssert(input_path_s != nullptr);
 
-            printf("Using input path '%s'\n", input_path_s);
-
             // TODO rename variables to be less confusing
             printf(
                 "Using %u workers (%u threads per worker), chunk size "
@@ -2090,7 +2048,7 @@ int main(int argc, char* argv[]) {
             auto& dc = std::get<DecodeContext>(vdec);
 
             // DvAssert(dc.demuxer != nullptr);
-            // av_dump_format(dc.demuxer, dc.video_index, input_path_s, 0);
+            av_dump_format(dc.demuxer, dc.video_index, input_path_s, 0);
 
             auto o_fname =
                 fs::path(input_path_s).filename().replace_extension();
