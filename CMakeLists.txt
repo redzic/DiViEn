@@ -7,8 +7,8 @@ project(DiViEn)
 
 
 set(CMAKE_CXX_STANDARD 23)
-set(CMAKE_BUILD_TYPE Release)
-# set(CMAKE_BUILD_TYPE Debug)
+# set(CMAKE_BUILD_TYPE Release)
+set(CMAKE_BUILD_TYPE Debug)
 
 set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
 set(CMAKE_COLOR_MAKEFILE TRUE)
@@ -17,6 +17,7 @@ set(CMAKE_COLOR_DIAGNOSTICS ON)
 set(ENABLE_IO_URING OFF CACHE BOOL "Use io-uring for tcp on linux (default off)")
 set(CONFIG_MSYS_UCRT64 OFF CACHE BOOL "Enable config for building on msys64 with ucrt64")
 
+# TODO: ensure these options are mutually exclusive
 option(ENABLE_IO_URING "Use io-uring for tcp on linux (default off)" OFF)
 option(CONFIG_MSYS_UCRT64 "Enable config for building on msys64 with ucrt64" OFF)
 
@@ -32,8 +33,8 @@ if (CONFIG_MSYS_UCRT64)
   set(CMAKE_NO_SYSTEM_FROM_IMPORTED 1)
 endif()
 
-# add_compile_options(-fsanitize=undefined -fsanitize=address -fsanitize=bounds -fsanitize=unsigned-integer-overflow  -fsanitize=local-bounds -fsanitize=signed-integer-overflow,null,alignment -fno-sanitize-recover=null -fsanitize-trap=alignment -fno-omit-frame-pointer)
-# add_link_options(-fsanitize=undefined -fsanitize=address -fsanitize=bounds -fsanitize=unsigned-integer-overflow  -fsanitize=local-bounds -fsanitize=signed-integer-overflow,null,alignment -fno-sanitize-recover=null -fsanitize-trap=alignment -fno-omit-frame-pointer)
+add_compile_options(-fsanitize=undefined -fsanitize=address -fsanitize=bounds -fsanitize=unsigned-integer-overflow  -fsanitize=local-bounds -fsanitize=signed-integer-overflow,null,alignment -fno-sanitize-recover=null -fsanitize-trap=alignment -fno-omit-frame-pointer)
+add_link_options(-fsanitize=undefined -fsanitize=address -fsanitize=bounds -fsanitize=unsigned-integer-overflow  -fsanitize=local-bounds -fsanitize=signed-integer-overflow,null,alignment -fno-sanitize-recover=null -fsanitize-trap=alignment -fno-omit-frame-pointer)
 
 # required for no dependencies on Windows (other than ffmpeg shared libs)
 

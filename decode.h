@@ -1,5 +1,6 @@
 #pragma once
 
+#include "util.h"
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -67,14 +68,7 @@ using FrameBuf = std::vector<AVFrame*>;
 // yeah so even if you override the destructor, the other destructors
 // still run afterward which is good.
 struct DemuxerContext {
-    // TODO does overriding the destructor make other destructors not run?
-
-    // is there a faster way to delete this constructors?
-    DemuxerContext() = delete;
-    DemuxerContext(DemuxerContext&&) = delete;
-    DemuxerContext(DemuxerContext&) = delete;
-    DemuxerContext& operator=(const DemuxerContext&) = delete;
-    DemuxerContext& operator=(const DemuxerContext&&) = delete;
+    DELETE_DEFAULT_CTORS(DemuxerContext)
 
     // TODO make sure this has no overhead
     std::unique_ptr<AVFormatContext, decltype([](AVFormatContext* ptr) {
@@ -109,18 +103,7 @@ struct DecodeContext {
     // error. Ideally with zero overhead. Because variant will take up
     // many more bytes. Shouldn't be used for this kinda stuff.
 
-    DecodeContext() = delete;
-
-    // move constructor
-    DecodeContext(DecodeContext&& source) = delete;
-
-    // copy constructor
-    DecodeContext(DecodeContext&) = delete;
-
-    // copy assignment operator
-    DecodeContext& operator=(const DecodeContext&) = delete;
-    // move assignment operator
-    DecodeContext& operator=(const DecodeContext&&) = delete;
+    DELETE_DEFAULT_CTORS(DecodeContext)
 
     ~DecodeContext() {
         // Since we deleted all the copy/move constructors,

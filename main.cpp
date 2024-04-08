@@ -27,20 +27,25 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <mutex>
 #include <pthread.h>
 #include <span>
+#include <system_error>
 #include <thread>
 #include <unistd.h>
 #include <unordered_set>
 #include <variant>
 #include <vector>
 
+namespace fs = std::filesystem;
+
 #include "decode.h"
 #include "resource.h"
 #include "segment.h"
+#include "util.h"
 
 extern "C" {
 
@@ -60,6 +65,8 @@ extern "C" {
 }
 
 // #define ASIO_ENABLE_HANDLER_TRACKING
+
+#define DIVIEN "DiViEn"
 
 #if defined(__ORDER_LITTLE_ENDIAN__) && defined(__ORDER_BIG_ENDIAN__) &&       \
     defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
@@ -148,12 +155,23 @@ struct EncodeLoopState {
     std::atomic<uint32_t> nb_frames_done{};
     std::atomic<uint32_t> nb_threads_done{};
 
-    // Should never be modified.
+    // These 3 should never be modified after initialization.
     unsigned int num_workers;
+    unsigned int chunk_frame_size;
+    unsigned int n_threads; // number of threads per worker
 
     AlwaysInline bool all_workers_finished() {
         return this->nb_threads_done == this->num_workers;
     }
+
+    DELETE_DEFAULT_CTORS(EncodeLoopState)
+    ~EncodeLoopState() = default;
+
+    explicit EncodeLoopState(unsigned int num_workers_,
+                             unsigned int chunk_frame_size_,
+                             unsigned int n_threads_)
+        : num_workers(num_workers_), chunk_frame_size(chunk_frame_size_),
+          n_threads(n_threads_) {}
 };
 
 // ok so the next step would be to fix this null frame thing
@@ -165,9 +183,19 @@ struct EncodeLoopState {
 
 // we should probably also set timestamps properly.
 
-bool avframe_has_buffer(AVFrame* frame) {
-    // printf("[width x height]: %dx%d\n", frame->width, frame->height);
+AlwaysInline bool avframe_has_buffer(AVFrame* frame) {
     return frame->buf[0] != nullptr && frame->width > 0 && frame->height > 0;
+}
+
+// TODO: make output filename configurable
+// the passed folder_name should include a slash
+auto chunk_fname(std::string_view folder_name, std::string_view prefix,
+                 unsigned int chunk_idx) {
+    std::array<char, 512> buf;
+    (void)snprintf(buf.data(), buf.size(), "%.*s%.*s_chunk_%u.mp4",
+                   (int)folder_name.size(), folder_name.data(),
+                   (int)prefix.size(), prefix.data(), chunk_idx);
+    return buf;
 }
 
 // If pkt is refcounted, we shouldn't have to copy any data.
@@ -218,7 +246,7 @@ int encode_frame(AVCodecContext* enc_ctx, AVFrame* frame, AVPacket* pkt,
 
         // can write the compressed packet to the bitstream now
 
-        (void)fwrite(pkt->data, pkt->size, 1, ostream);
+        DvAssert(fwrite(pkt->data, 1, pkt->size, ostream) == (size_t)pkt->size);
 
         // WILL NEED THIS FUNCTION: av_frame_make_writable
         //
@@ -268,17 +296,14 @@ AVPixelFormat av_pix_fmt_supported_version(AVPixelFormat pix_fmt) {
 // we need to make a version of this that doesn't just encode everything and
 // flush the output at once
 
-#define ENCODER_NAME "libaom-av1"
+#define ENCODER_NAME "libx264"
 
 struct EncoderContext {
     AVCodecContext* avcc{nullptr};
     AVPacket* pkt{nullptr};
 
     EncoderContext() = default;
-    EncoderContext(EncoderContext&) = delete;
-    EncoderContext(EncoderContext&&) = delete;
-    EncoderContext& operator=(const EncoderContext&) = delete;
-    EncoderContext& operator=(const EncoderContext&&) = delete;
+    DELETE_COPYMOVE_CTORS(EncoderContext)
 
     // TODO proper error handling, return std::expected
     // caller needs to ensure they only call this once
@@ -302,12 +327,12 @@ struct EncoderContext {
             av_pix_fmt_supported_version((AVPixelFormat)frame->format);
 
         // X264/5:
-        // av_opt_set(avcc->priv_data, "crf", "30", 0);
-        // av_opt_set(avcc->priv_data, "preset", "ultrafast", 0);
+        av_opt_set(avcc->priv_data, "crf", "30", 0);
+        av_opt_set(avcc->priv_data, "preset", "ultrafast", 0);
         // AOM:
-        av_opt_set(avcc->priv_data, "cpu-used", "6", 0);
-        av_opt_set(avcc->priv_data, "end-usage", "q", 0);
-        av_opt_set(avcc->priv_data, "cq-level", "30", 0);
+        // av_opt_set(avcc->priv_data, "cpu-used", "6", 0);
+        // av_opt_set(avcc->priv_data, "end-usage", "q", 0);
+        // av_opt_set(avcc->priv_data, "cq-level", "30", 0);
         // av_opt_set(avcc->priv_data, "enable-qm", "1", 0);
 
         int ret = avcodec_open2(avcc, codec, nullptr);
@@ -348,13 +373,10 @@ int encode_frames(const char* file_name, std::span<AVFrame*> frame_buffer,
     return 0;
 }
 
-int encode_chunk(unsigned int chunk_idx, std::span<AVFrame*> framebuf,
+int encode_chunk(std::string_view base_path, std::string_view prefix,
+                 unsigned int chunk_idx, std::span<AVFrame*> framebuf,
                  EncodeLoopState& state, unsigned int n_threads) {
-    std::array<char, 64> buf{};
-
-    // this should write null terminator
-    (void)snprintf(buf.data(), buf.size(), "file %d.mp4", chunk_idx);
-
+    auto buf = chunk_fname(base_path, prefix, chunk_idx);
     return encode_frames(buf.data(), framebuf, state, n_threads);
 }
 
@@ -492,12 +514,12 @@ void encode_frame_range(FrameAccurateWorkItem& data, const char* ofname) {
 
 // framebuf is start of frame buffer that worker can use
 // TODO pass n_threads and chunk size in with some shared state
-int worker_thread(unsigned int worker_id, DecodeContext& decoder,
-                  EncodeLoopState& state, unsigned int chunk_frame_size,
-                  unsigned int n_threads) {
+int worker_thread(std::string_view base_path, std::string_view prefix,
+                  unsigned int worker_id, DecodeContext& decoder,
+                  EncodeLoopState& state) {
     while (true) {
-        for (size_t i = 0; i < chunk_frame_size; i++) {
-            size_t idx = (size_t)worker_id * chunk_frame_size + i;
+        for (size_t i = 0; i < state.chunk_frame_size; i++) {
+            size_t idx = (size_t)worker_id * state.chunk_frame_size + i;
             if (avframe_has_buffer(decoder.framebuf[idx])) {
                 DvAssert(av_frame_make_writable(decoder.framebuf[idx]) == 0);
             }
@@ -510,8 +532,9 @@ int worker_thread(unsigned int worker_id, DecodeContext& decoder,
         state.global_decoder_mutex.lock();
 
         // decode CHUNK_FRAME_SIZE frames into frame buffer
-        int frames = run_decoder(decoder, (size_t)worker_id * chunk_frame_size,
-                                 chunk_frame_size);
+        int frames =
+            run_decoder(decoder, (size_t)worker_id * state.chunk_frame_size,
+                        state.chunk_frame_size);
 
         // error decoding
         if (frames <= 0) {
@@ -531,12 +554,12 @@ int worker_thread(unsigned int worker_id, DecodeContext& decoder,
 
         // a little sketchy but in theory this should be fine
         // since framebuf is never modified
-        int ret =
-            encode_chunk(chunk_idx,
-                         {decoder.framebuf.data() +
-                              ((size_t)worker_id * (size_t)chunk_frame_size),
-                          (size_t)frames},
-                         state, n_threads);
+        int ret = encode_chunk(
+            base_path, prefix, chunk_idx,
+            {decoder.framebuf.data() +
+                 ((size_t)worker_id * (size_t)state.chunk_frame_size),
+             (size_t)frames},
+            state, state.n_threads);
 
         if (ret != 0) {
             // in theory... this shouldn't need to happen as this is an encoding
@@ -568,14 +591,14 @@ void avlog_do_nothing(void* /* unused */, int /* level */,
 // this is direct concatenation, nothing extra done to files.
 // hardcoded. TODO remove.
 // perhaps we could special case this for 1 input file.
-void raw_concat_files(const char* out_filename, unsigned int num_files,
+// TODO error handling
+void raw_concat_files(std::string_view base_path, std::string_view prefix,
+                      const char* out_filename, unsigned int num_files,
                       bool delete_after = false) {
-    std::array<char, 64> buf{};
-
     std::ofstream dst(out_filename, std::ios::binary);
 
     for (unsigned int i = 0; i < num_files; i++) {
-        (void)snprintf(buf.data(), buf.size(), "file %d.mp4", i);
+        auto buf = chunk_fname(base_path, prefix, i);
         std::ifstream src(buf.data(), std::ios::binary);
         dst << src.rdbuf();
         src.close();
@@ -589,11 +612,6 @@ void raw_concat_files(const char* out_filename, unsigned int num_files,
 }
 
 } // namespace
-
-// clang AST transformations is something to consider
-// for converting [] to .at()
-
-// void encode_loop_nonchunked(DecodeContext& d_ctx) {}
 
 // TODO perhaps for tests we can try with lossless
 // encoding and compare video results.
@@ -613,36 +631,49 @@ void raw_concat_files(const char* out_filename, unsigned int num_files,
 // There's some kind of stalling going on here.
 // TODO make option to test standalone encoder.
 // There's only supposed to be 487 frames on 2_3.
-void main_encode_loop(const char* out_filename, DecodeContext& d_ctx,
-                      unsigned int num_workers, unsigned int chunk_frame_size,
-                      unsigned int n_threads) {
-    // uh... we really need a safe way to do this and stuff
-    // this is really bad... just assuming enough frames are
-    // available
+
+// This function will create a base path.
+[[nodiscard]] int
+chunked_encode_loop(const char* in_filename, const char* out_filename,
+                    DecodeContext& d_ctx, unsigned int num_workers,
+                    unsigned int chunk_frame_size, unsigned int n_threads) {
+    // TODO avoid dynamic memory allocation here
+    auto base_path =
+        fs::path(in_filename).filename().replace_extension().generic_string();
+
+    // TODO technically could avoid copy here by using same pointer
+    auto prefix = base_path;
+
+    // TODO avoid copies and memory allocation here
+    // TODO check whether output file already exists
+    base_path.append("_divien/");
+    std::error_code fs_ec;
+    bool was_created = fs::create_directory(base_path, fs_ec);
+    if (fs_ec) {
+        printf(DIVIEN ": Error creating temporary directory '%s': %s\n",
+               base_path.c_str(), fs_ec.message().c_str());
+        return -1;
+    }
+    if (!was_created) {
+        printf(DIVIEN ": Warning: using existing temporary directory '%s'\n",
+               base_path.c_str());
+    } else {
+        printf("Using temporary directory: '%s'\n", base_path.c_str());
+    }
+
     printf("Writing encoded output to '%s'\n", out_filename);
 
-    // TODO: make explicit constructor for this
-    EncodeLoopState state{};
-    state.num_workers = num_workers;
+    EncodeLoopState state(num_workers, chunk_frame_size, n_threads);
 
     auto start = now();
 
-    // TODO use stack array here
-    // even if we have dynamic workers, I believe we
-    // can use alloca. Not really totally ideal but,
-    // whatever. Or just array with max capacity.
     std::vector<std::thread> thread_vector{};
-    thread_vector.reserve(num_workers);
+    thread_vector.reserve(state.num_workers);
 
     // spawn worker threads
-    for (unsigned int i = 0; i < num_workers; i++) {
-        // TODO I think it's theoretically possible
-        // that constructing the threads fail, in which case
-        // the memory needs to be cleaned up differently (I think).
-        // Since otherwise we'd be destructing unallocated objects.
-        thread_vector.emplace_back(&worker_thread, i, std::ref(d_ctx),
-                                   std::ref(state), chunk_frame_size,
-                                   n_threads);
+    for (unsigned int i = 0; i < state.num_workers; i++) {
+        thread_vector.emplace_back(&worker_thread, base_path, prefix, i,
+                                   std::ref(d_ctx), std::ref(state));
     }
 
     printf("frame= 0  (0 fps)\n");
@@ -722,7 +753,8 @@ void main_encode_loop(const char* out_filename, DecodeContext& d_ctx,
             memcpy(avg_fps_fmt.data(), "?", 2);
         } else [[likely]] {
             auto avg_fps = compute_fps(n_frames, total_elapsed_ms);
-            snprintf(avg_fps_fmt.data(), avg_fps_fmt.size(), "%.1f", avg_fps);
+            (void)snprintf(avg_fps_fmt.data(), avg_fps_fmt.size(), "%.1f",
+                           avg_fps);
         }
 
         // print progress
@@ -742,19 +774,16 @@ void main_encode_loop(const char* out_filename, DecodeContext& d_ctx,
     // but we need to call .join() anyways.
     for (auto& t : thread_vector) {
         t.join();
-        // should we call this? I'm not sure.
-        // asan/ubsan doesn't complain but at the same time
-        // aren't the destructors already called?
-        // and from some tests it does seem like
-        // you can easily do a double free if you want to...
-        // t.~thread();
     }
 
     // there is no active lock on the mutex since all threads
     // terminated, so global_chunk_id can be safely accessed.
     // raw_concat_files(out_filename, global_chunk_id, true);
     // TODO why does deleting files fail sometimes?
-    raw_concat_files(out_filename, state.global_chunk_id, false);
+    // TODO error handling
+    raw_concat_files(base_path, prefix, out_filename, state.global_chunk_id,
+                     false);
+    return 0;
 }
 
 // I guess the next step is to send each chunk in a loop.
@@ -1526,8 +1555,7 @@ template <typename F> struct OnReturn {
     F f;
 
     explicit OnReturn(F f_) : f(f_) {}
-    OnReturn(const OnReturn&) = delete;
-    OnReturn(OnReturn&&) = delete;
+    DELETE_DEFAULT_CTORS(OnReturn)
     ~OnReturn() { f(); }
 };
 
@@ -1864,11 +1892,11 @@ int try_parse_uint(unsigned int& result, const char* sp,
         return 0;
     } else if (ec == std::errc::invalid_argument) {
         (void)fprintf(stderr,
-                      "DiViEn: Error: Argument for %.*s: invalid argument\n",
+                      DIVIEN ": Error: Argument for %.*s: invalid argument\n",
                       (int)argname.size(), argname.data());
     } else if (ec == std::errc::result_out_of_range) {
         (void)fprintf(stderr,
-                      "DiViEn: Error: Argument for %.*s: value out of range\n",
+                      DIVIEN ": Error: Argument for %.*s: value out of range\n",
                       (int)argname.size(), argname.data());
     }
     return -1;
@@ -1877,8 +1905,8 @@ int try_parse_uint(unsigned int& result, const char* sp,
 int main(int argc, char* argv[]) {
     if (argc < 2) {
         // clang-format off
-        w_err("DiViEn: must specify at least 2 args.\n"
-              "Usage: ./DiViEn <mode> <args>\n"
+        w_err(DIVIEN ": must specify at least 2 args.\n"
+              " Usage: ./DiViEn <mode> <args>\n\n"
               "Available modes:\n"
               "    server <video>   Run centralized server for distributed encoding (WARNING: NOT FULLY FUNCTIONAL)\n"
               "    client           Run client that connects to DiViEn server instance (WARNING: NOT FULLY FUNCTIONAL)\n"
@@ -1934,6 +1962,7 @@ int main(int argc, char* argv[]) {
             run_client_full();
         } else {
             // interpret as standalone mode otherwise
+            // TODO perhaps ensure duplicate arguments don't exist
 
             // We are only allowed to have one input path.
             // TODO: consolidate this code
@@ -1986,7 +2015,7 @@ int main(int argc, char* argv[]) {
 
                 continue;
             length_fail:
-                printf("DiViEn: No argument provided for %.*s.\n",
+                printf("DiViEn: Error: No argument provided for %.*s.\n",
                        (int)possible_args[arg_errmsg].size(),
                        possible_args[arg_errmsg].data());
 
@@ -2018,6 +2047,11 @@ int main(int argc, char* argv[]) {
             PARSE_OPTIONAL_ARG(threads_per_worker, threads_per_worker_s,
                                "-tpw");
             PARSE_OPTIONAL_ARG(chunk_size, framebuf_size_s, "-bsize");
+            if (chunk_size == 0) [[unlikely]] {
+                // TODO enforce this in some other struct as well
+                w_err(DIVIEN ": Error: -bsize cannot be 0\n");
+                return -1;
+            }
 
             // Now we need to validate the input we received.
             // TODO: move everything for CLI parsing into its own function.
@@ -2049,13 +2083,17 @@ int main(int argc, char* argv[]) {
                 return -1;
             }
 
-            main_encode_loop("standalone_output.mp4",
-                             std::get<DecodeContext>(vdec), num_workers,
-                             chunk_size, threads_per_worker);
+            auto o_fname =
+                fs::path(input_path_s).filename().replace_extension();
+            o_fname.concat("_divien_" ENCODER_NAME ".mp4");
+            DvAssert(chunked_encode_loop(input_path_s, o_fname.c_str(),
+                                         std::get<DecodeContext>(vdec),
+                                         num_workers, chunk_size,
+                                         threads_per_worker) == 0);
         }
 
     } catch (std::exception& e) {
-        printf("Exception: %s\n", e.what());
+        printf("DiViEn: Exception occurred: %s\n", e.what());
     }
 }
 
