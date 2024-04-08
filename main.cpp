@@ -1909,11 +1909,6 @@ int main(int argc, char* argv[]) {
         return -1;
     }
 
-    OnReturn _flusher([]() {
-        (void)fflush(stdout);
-        (void)fflush(stderr);
-    });
-
 #if defined(__unix__)
     struct sigaction sigIntHandler {};
 
@@ -2166,6 +2161,9 @@ int main(int argc, char* argv[]) {
             DvAssert(chunked_encode_loop(
                          e_opts, input_path_s, o_fname.generic_string().c_str(),
                          dc, num_workers, chunk_size, threads_per_worker) == 0);
+
+            (void)fflush(stderr);
+            (void)fflush(stdout);
         }
 
     } catch (std::exception& e) {
