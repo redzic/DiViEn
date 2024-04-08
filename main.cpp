@@ -297,7 +297,21 @@ AVPixelFormat av_pix_fmt_supported_version(AVPixelFormat pix_fmt) {
 // we need to make a version of this that doesn't just encode everything and
 // flush the output at once
 
-#define ENCODER_NAME "libaom-av1"
+// This is a REFERENCE to other existing data.
+struct EncoderOpts {
+    const char* encoder_name = nullptr;
+    char** params = nullptr;
+    size_t n_param_pairs = 0;
+
+    EncoderOpts() = delete;
+
+    explicit constexpr EncoderOpts(const char* encoder_name_, char** params_,
+                                   size_t n_param_pairs_)
+        : encoder_name(encoder_name_), params(params_),
+          n_param_pairs(n_param_pairs_) {}
+};
+
+constexpr EncoderOpts DEFAULT_ENCODER = EncoderOpts("libx264", nullptr, 0);
 
 struct EncoderContext {
     AVCodecContext* avcc{nullptr};
@@ -308,8 +322,10 @@ struct EncoderContext {
 
     // TODO proper error handling, return std::expected
     // caller needs to ensure they only call this once
-    void initialize_codec(AVFrame* frame, unsigned int n_threads) {
-        const auto* codec = avcodec_find_encoder_by_name(ENCODER_NAME);
+    // The e_opts should start with a '-'.
+    void initialize_codec(AVFrame* frame, unsigned int n_threads,
+                          EncoderOpts e_opts) {
+        const auto* codec = avcodec_find_encoder_by_name(e_opts.encoder_name);
         avcc = avcodec_alloc_context3(codec);
         DvAssert(avcc);
         pkt = av_packet_alloc();
@@ -331,11 +347,21 @@ struct EncoderContext {
         // DvAssert(av_opt_set(avcc->priv_data, "crf", "30", 0) == 0);
         // DvAssert(av_opt_set(avcc->priv_data, "preset", "ultrafast", 0) == 0);
         // AOM:
-        DvAssert(av_opt_set(avcc->priv_data, "cpu-used", "6", 0) == 0);
-        DvAssert(av_opt_set(avcc->priv_data, "crf", "30", 0) == 0);
-        DvAssert(av_opt_set(avcc->priv_data, "aom-params", "cq-level=30", 0) ==
-                 0);
-        // DvAssert(av_opt_set(avcc->priv_data, "enable-qm", "1", 0));
+        // DvAssert(av_opt_set(avcc->priv_data, "cpu-used", "6", 0) == 0);
+        // DvAssert(av_opt_set(avcc->priv_data, "crf", "30", 0) == 0);
+        // DvAssert(av_opt_set(avcc->priv_data, "aom-params", "cq-level=30", 0)
+        // ==
+        //          0);
+        for (size_t i = 0; i < e_opts.n_param_pairs; i++) {
+            // TODO print error message for failed param
+            // TODO: according to godbolt, is += 2 better in the loop condition?
+            const char* key = e_opts.params[2 * i];
+            const char* value = e_opts.params[2 * i + 1];
+            DvAssert(strlen(key) >= 1);
+            DvAssert(strlen(value) >= 1);
+            DvAssert(key[0] == '-');
+            DvAssert(av_opt_set(avcc->priv_data, key + 1, value, 0) == 0);
+        }
 
         int ret = avcodec_open2(avcc, codec, nullptr);
         DvAssert(ret == 0 && "Failed to open encoder codec");
@@ -350,11 +376,12 @@ struct EncoderContext {
 };
 
 int encode_frames(const char* file_name, std::span<AVFrame*> frame_buffer,
-                  EncodeLoopState& state, unsigned int n_threads) {
+                  EncodeLoopState& state, unsigned int n_threads,
+                  EncoderOpts e_opts) {
     DvAssert(!frame_buffer.empty());
 
     EncoderContext encoder;
-    encoder.initialize_codec(frame_buffer[0], n_threads);
+    encoder.initialize_codec(frame_buffer[0], n_threads, e_opts);
 
     // C-style IO is needed for binary size to not explode on Windows with
     // static linking
@@ -375,11 +402,13 @@ int encode_frames(const char* file_name, std::span<AVFrame*> frame_buffer,
     return 0;
 }
 
-int encode_chunk(std::string_view base_path, std::string_view prefix,
-                 unsigned int chunk_idx, std::span<AVFrame*> framebuf,
-                 EncodeLoopState& state, unsigned int n_threads) {
+AlwaysInline int encode_chunk(std::string_view base_path,
+                              std::string_view prefix, unsigned int chunk_idx,
+                              std::span<AVFrame*> framebuf,
+                              EncodeLoopState& state, unsigned int n_threads,
+                              EncoderOpts e_opts) {
     auto buf = chunk_fname(base_path, prefix, chunk_idx);
-    return encode_frames(buf.data(), framebuf, state, n_threads);
+    return encode_frames(buf.data(), framebuf, state, n_threads, e_opts);
 }
 
 struct FrameAccurateWorkItem {
@@ -456,7 +485,8 @@ void encode_frame_range(FrameAccurateWorkItem& data, const char* ofname) {
                             DvAssert(decode_next(dc, frame) == 0);
                             if (nf == 0) {
                                 // TODO use proper amount of threads
-                                encoder.initialize_codec(frame, 1);
+                                encoder.initialize_codec(frame, 1,
+                                                         DEFAULT_ENCODER);
                                 enc_was_init = true;
                             }
                             av_frame_unref(frame);
@@ -481,7 +511,7 @@ void encode_frame_range(FrameAccurateWorkItem& data, const char* ofname) {
 
                         if (!enc_was_init) [[unlikely]] {
                             // TODO use proper amoutn of threads
-                            encoder.initialize_codec(frame, 1);
+                            encoder.initialize_codec(frame, 1, DEFAULT_ENCODER);
                             enc_was_init = true;
                         }
 
@@ -518,7 +548,7 @@ void encode_frame_range(FrameAccurateWorkItem& data, const char* ofname) {
 // TODO pass n_threads and chunk size in with some shared state
 int worker_thread(std::string_view base_path, std::string_view prefix,
                   unsigned int worker_id, DecodeContext& decoder,
-                  EncodeLoopState& state) {
+                  EncodeLoopState& state, EncoderOpts e_opts) {
     while (true) {
         for (size_t i = 0; i < state.chunk_frame_size; i++) {
             size_t idx = (size_t)worker_id * state.chunk_frame_size + i;
@@ -561,7 +591,7 @@ int worker_thread(std::string_view base_path, std::string_view prefix,
             {decoder.framebuf.data() +
                  ((size_t)worker_id * (size_t)state.chunk_frame_size),
              (size_t)frames},
-            state, state.n_threads);
+            state, state.n_threads, e_opts);
 
         if (ret != 0) {
             // in theory... this shouldn't need to happen as this is an encoding
@@ -625,10 +655,12 @@ void raw_concat_files(std::string_view base_path, std::string_view prefix,
 // There's only supposed to be 487 frames on 2_3.
 
 // This function will create a base path.
+// params is for encoder options
 [[nodiscard]] int
-chunked_encode_loop(const char* in_filename, const char* out_filename,
-                    DecodeContext& d_ctx, unsigned int num_workers,
-                    unsigned int chunk_frame_size, unsigned int n_threads) {
+chunked_encode_loop(EncoderOpts e_opts, const char* in_filename,
+                    const char* out_filename, DecodeContext& d_ctx,
+                    unsigned int num_workers, unsigned int chunk_frame_size,
+                    unsigned int n_threads) {
     // TODO avoid dynamic memory allocation here
     auto base_path =
         fs::path(in_filename).filename().replace_extension().generic_string();
@@ -665,7 +697,7 @@ chunked_encode_loop(const char* in_filename, const char* out_filename,
     // spawn worker threads
     for (unsigned int i = 0; i < state.num_workers; i++) {
         thread_vector.emplace_back(&worker_thread, base_path, prefix, i,
-                                   std::ref(d_ctx), std::ref(state));
+                                   std::ref(d_ctx), std::ref(state), e_opts);
     }
 
     printf("frame= 0  (0 fps)\n");
@@ -1915,17 +1947,25 @@ int main(int argc, char* argv[]) {
 
             // We are only allowed to have one input path.
             // TODO: consolidate this code
+            // TODO allow for other options besides -c:v that ffmpeg supports,
+            // like -vcodec
             static constexpr std::string_view possible_args[] = {
-                "-i", "-w", "-tpw", "-bsize"};
+                "-i", "-w", "-tpw", "-bsize", "-c:v"};
             size_t arg_errmsg = 0;
 
+            // required arguments
             const char* input_path_s = nullptr;
+            // optional params
+            const char* encoder_name_s = "libx264"; // default to libx264
             const char* num_workers_s = nullptr;
             const char* threads_per_worker_s = nullptr;
             const char* framebuf_size_s = nullptr;
+            char** ff_enc_first_param = nullptr;
+            size_t ff_enc_n_params = 0;
 
             DvAssert(argc >= 3);
             // parse the rest of the options here
+
             for (size_t arg_i = 1; arg_i < (size_t)argc; arg_i++) {
 
                 // this is ugly but at least it works
@@ -1956,13 +1996,32 @@ int main(int argc, char* argv[]) {
                     LENGTH_CHECK(2, threads_per_worker_s);
                 } else if (arg_sv == possible_args[3]) {
                     LENGTH_CHECK(3, framebuf_size_s);
+                } else if (arg_sv == possible_args[4]) {
+                    LENGTH_CHECK(4, encoder_name_s);
+                } else if (arg_sv == "-ff") {
+                    if (arg_i + 1 >= (size_t)argc) {
+                        printf(DIVIEN
+                               ": Error: No parameters specified for -ff.\n");
+                        return -1;
+                    }
+                    arg_i++;
+                    ff_enc_first_param = &argv[arg_i];
+                    for (; arg_i < (size_t)argc &&
+                           std::string_view(argv[arg_i]) != "--";
+                         arg_i++) {
+                        ff_enc_n_params++;
+                    }
+                    // arg_i is now on "--", or at the end.
+                    continue;
+                    // TODO: later support detecting the exact options ffmpeg
+                    // supports so we don't have to do -ff.
+                    // LENGTH_CHECK(idx_value, store_variable)
                 } else {
                     printf("DiViEn: Unrecognized command-line option '%.*s'.\n",
                            (int)arg_sv.size(), arg_sv.data());
                     return -1;
                 }
 
-                continue;
             length_fail:
                 printf("DiViEn: Error: No argument provided for %.*s.\n",
                        (int)possible_args[arg_errmsg].size(),
@@ -2014,12 +2073,52 @@ int main(int argc, char* argv[]) {
             DvAssert(input_path_s != nullptr);
 
             // TODO rename variables to be less confusing
-            printf(
-                "Using %u workers (%u threads per worker), chunk size "
-                "= %u "
-                "frames per worker\nRunning in standalone mode [" ENCODER_NAME
-                "]\n",
-                num_workers, threads_per_worker, chunk_size);
+            printf("Using %u workers (%u threads per worker), chunk size "
+                   "= %u "
+                   "frames per worker\nRunning in standalone mode [%s]\n",
+                   num_workers, threads_per_worker, chunk_size, encoder_name_s);
+
+            if (ff_enc_n_params & 1) {
+                printf("DiViEn: Error: -ff: Odd number of parameters specified "
+                       "(mismatched parameters)\n"
+                       "  -ff arguments must be a list of key-value pairs.\n");
+                return -1;
+            }
+            // now equal to the number of pairs
+            DvAssert((ff_enc_n_params == 0) ^ (ff_enc_first_param != nullptr));
+            ff_enc_n_params /= 2;
+            for (size_t i = 0; i < ff_enc_n_params; i++) {
+                auto validate_param = [](const char* param) {
+                    DvAssert(param != nullptr && strlen(param) >= 1);
+                };
+                const char* key = ff_enc_first_param[2 * i];
+                const char* value = ff_enc_first_param[2 * i + 1];
+                validate_param(key);
+                validate_param(value);
+                // TODO figure out better way to write this, maybe without
+                // string_view. strcmp would almost certainly be better here.
+                std::string_view key_sv = key;
+                if (!key_sv.starts_with('-')) {
+                    printf(DIVIEN
+                           ": Error: arguments for -ff must start with '-'.\n");
+                    return -1;
+                }
+            }
+
+            // printing code
+            if (ff_enc_n_params) {
+                printf(DIVIEN ": -ff params (for encoder %s): ",
+                       encoder_name_s);
+            }
+            for (size_t i = 0; i < ff_enc_n_params; i++) {
+                const char* key = ff_enc_first_param[2 * i];
+                const char* value = ff_enc_first_param[2 * i + 1];
+                printf("%s %s ", key, value);
+            }
+            if (ff_enc_n_params) {
+                printf("\n");
+            }
+
             // TODO make sure this doesn't throw exceptions.
             auto vdec =
                 DecodeContext::open(input_path_s, chunk_size * num_workers);
@@ -2043,10 +2142,21 @@ int main(int argc, char* argv[]) {
 
             auto o_fname =
                 fs::path(input_path_s).filename().replace_extension();
-            o_fname.concat("_divien_" ENCODER_NAME ".mp4");
+            {
+                fmt_buf suffix;
+                (void)snprintf(suffix.data(), suffix.size(), "_divien_%s.mp4",
+                               encoder_name_s);
+                o_fname.concat(suffix.data());
+            }
+
+            EncoderOpts e_opts(encoder_name_s, ff_enc_first_param,
+                               ff_enc_n_params);
+
+            // TODO make params and param pairs all a part of encoder options
+            // struct that's passed around
             DvAssert(chunked_encode_loop(
-                         input_path_s, o_fname.generic_string().c_str(), dc,
-                         num_workers, chunk_size, threads_per_worker) == 0);
+                         e_opts, input_path_s, o_fname.generic_string().c_str(),
+                         dc, num_workers, chunk_size, threads_per_worker) == 0);
         }
 
     } catch (std::exception& e) {
