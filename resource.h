@@ -18,10 +18,15 @@ template <typename T, auto Alloc, auto Free> auto make_resource() {
 #ifdef NDEBUG
 constexpr inline void DvAssert(bool /*unused*/) {}
 #define DvAssert2 DvAssert
+#define DvAssert3(expr) ((void)0)
 #else // DEBUG
 #include <cassert>
 #include <libassert/assert.hpp>
-// #define DvAssert assert
-#define DvAssert DEBUG_ASSERT_VAL
+// Regular assertion (side effects exist in debug mode), most common use case
+#define DvAssert DEBUG_ASSERT
+// Workaround for certain unsupported cases in libassert (e.g., bit fields)
 #define DvAssert2 assert
+// Debug assertion, expression and side effects deleted entirely in Release
+// mode.
+#define DbgDvAssert DEBUG_ASSERT
 #endif

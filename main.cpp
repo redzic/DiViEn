@@ -343,15 +343,6 @@ struct EncoderContext {
         avcc->pix_fmt =
             av_pix_fmt_supported_version((AVPixelFormat)frame->format);
 
-        // X264/5:
-        // DvAssert(av_opt_set(avcc->priv_data, "crf", "30", 0) == 0);
-        // DvAssert(av_opt_set(avcc->priv_data, "preset", "ultrafast", 0) == 0);
-        // AOM:
-        // DvAssert(av_opt_set(avcc->priv_data, "cpu-used", "6", 0) == 0);
-        // DvAssert(av_opt_set(avcc->priv_data, "crf", "30", 0) == 0);
-        // DvAssert(av_opt_set(avcc->priv_data, "aom-params", "cq-level=30", 0)
-        // ==
-        //          0);
         for (size_t i = 0; i < e_opts.n_param_pairs; i++) {
             // TODO print error message for failed param
             // TODO: according to godbolt, is += 2 better in the loop condition?
@@ -1882,12 +1873,17 @@ void run_client_full() {
 int try_parse_uint(unsigned int& result, const char* sp,
                    std::string_view argname) {
     std::string_view str = sp;
-    unsigned int value = 0;
     auto [ptr, ec] =
-        std::from_chars(str.data(), str.data() + str.size(), value, 10);
+        std::from_chars(str.data(), str.data() + str.size(), result, 10);
 
     if (ec == std::errc()) {
-        result = value;
+        if (ptr != (str.data() + str.size())) {
+            (void)fprintf(stderr,
+                          DIVIEN ": Error: Argument for %.*s: argument "
+                                 "contains non-digit characters\n",
+                          (int)argname.size(), argname.data());
+            return -1;
+        }
         return 0;
     } else if (ec == std::errc::invalid_argument) {
         (void)fprintf(stderr,
