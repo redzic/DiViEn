@@ -2107,10 +2107,7 @@ int main(int argc, char* argv[]) {
                 const char* value = ff_enc_first_param[2 * i + 1];
                 validate_param(key);
                 validate_param(value);
-                // TODO figure out better way to write this, maybe without
-                // string_view. strcmp would almost certainly be better here.
-                std::string_view key_sv = key;
-                if (!key_sv.starts_with('-')) {
+                if (key[0] != '-') {
                     printf(DIVIEN
                            ": Error: arguments for -ff must start with '-'.\n");
                     return -1;
