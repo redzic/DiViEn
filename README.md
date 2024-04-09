@@ -44,6 +44,14 @@ Specify arguments (e.g., 8 workers, 4 threads per worker, libaom-av1, custom enc
 ./DiViEn -i <path/to/input.mp4> -w 8 -c:v libaom-av1 -ff -crf 30 -cpu-used 6 -- -tpw 4
 ```
 
+Specify custom arguments and threading options with x265 (`--` can be omitted if `-ff` is at the end of the argument list):
+
+```
+./DiViEn -i <path/to/input.mp4> -w 8 -c:v libx265 -ff -crf 25 -preset veryfast -x265-params pools=none:frame-threads=2
+```
+
+Note that the `-tpw` option does not always correlate with encoder-specific options. `-tpw` corresponds with the `-threads` option in ffmpeg. Prefer encoder-specific options for threading if available.
+
 The output will be in `standalone_output.mp4`.
 
 The output file may not be fully compatible with some video players at the moment due to
@@ -51,6 +59,6 @@ a lack of proper timestamps being set. This should be fixed in the future.
 
 Distributed encoding currently is implemented in a basic form, but contains bugs. These should be fixed in the future.
 
-### Current Limitations 
+### Current Limitations
 
 - Currently, only fixed sized chunks are supported. Scene detection is not currently implemented.

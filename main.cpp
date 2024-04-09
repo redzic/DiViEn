@@ -1911,10 +1911,13 @@ int main(int argc, char* argv[]) {
               "          -i      <input_path>      Path to input video to encode [required]\n"
               "          -w      <num_workers>     Set number of workers (parallel encoder instances)\n"
               "          -tpw    <num_threads>     Set number of threads per worker\n"
+              "                                        NOTE: This does not always correlate to the encoder's threading\n"
+              "                                        options. Prefer manually specifying encoder-specific options\n"
+              "                                        if available.\n"
               "          -bsize  <num_frames>      Set frame buffer size (chunk size) for each worker\n"
               "          -c:v    <codec_name>      Set codec for encoding [default: libx264]\n"
               "          -ff     <args> --         List of arguments to pass, delimited by -- \n"
-              "             ex:                     -ff -crf 30 -preset veryfast --\n"
+              "             ex:                        -ff -crf 30 -preset veryfast --\n"
               );
         // clang-format on
 
