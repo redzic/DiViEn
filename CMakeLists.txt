@@ -48,6 +48,7 @@ if(NOT WIN32)
   set(BoldWhite   "${Esc}[1;37m")
 endif()
 
+# enable sanitizers and libassert in debug mode
 if (CMAKE_BUILD_TYPE STREQUAL "Debug")
   message("${BoldRed}Building in Debug mode  (WARNING: ENABLES SANITIZERS AND LIBASSERT -- INCURS EXTRA RUNTIME OVERHEAD)${ColorReset}")
 
@@ -66,6 +67,13 @@ if (CMAKE_BUILD_TYPE STREQUAL "Debug")
     GIT_TAG        v2.0.1 # <HASH or TAG>
   )
   FetchContent_MakeAvailable(libassert)
+endif()
+
+if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+  find_program(LLD_LINKER "lld")
+  if (LLD_LINKER)
+    add_link_options   (-fuse-ld=lld)
+  endif()
 endif()
 
 if(NOT CONFIG_MSYS_UCRT64)
