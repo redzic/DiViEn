@@ -17,7 +17,11 @@ template <typename T, auto Alloc, auto Free> auto make_resource() {
 // TODO how do I disable warnings?
 #ifdef NDEBUG
 constexpr inline void DvAssert(bool /*unused*/) {}
+#define DvAssert2 DvAssert
 #else // DEBUG
 #include <cassert>
-#define DvAssert assert
+#include <libassert/assert.hpp>
+// #define DvAssert assert
+#define DvAssert DEBUG_ASSERT_VAL
+#define DvAssert2 assert
 #endif

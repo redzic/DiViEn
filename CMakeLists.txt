@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.26)
 
-# set(CMAKE_C_COMPILER clang)
-# set(CMAKE_CXX_COMPILER clang++)
+set(CMAKE_C_COMPILER clang)
+set(CMAKE_CXX_COMPILER clang++)
 
 project(DiViEn)
 
@@ -33,15 +33,41 @@ if (CONFIG_MSYS_UCRT64)
   set(CMAKE_NO_SYSTEM_FROM_IMPORTED 1)
 endif()
 
-# add_compile_options(-fsanitize=undefined -fsanitize=address -fsanitize=bounds -fsanitize=unsigned-integer-overflow  -fsanitize=local-bounds -fsanitize=signed-integer-overflow,null,alignment -fno-sanitize-recover=null -fsanitize-trap=alignment -fno-omit-frame-pointer)
-# add_link_options(-fsanitize=undefined -fsanitize=address -fsanitize=bounds -fsanitize=unsigned-integer-overflow  -fsanitize=local-bounds -fsanitize=signed-integer-overflow,null,alignment -fno-sanitize-recover=null -fsanitize-trap=alignment -fno-omit-frame-pointer)
+# https://stackoverflow.com/questions/18968979/how-to-make-colorized-message-with-cmake
+if(NOT WIN32)
+  string(ASCII 27 Esc)
+  set(ColorReset  "${Esc}[m")
+  set(ColorBold   "${Esc}[1m")
+  set(Red         "${Esc}[31m")
+  set(BoldRed     "${Esc}[1;31m")
+  set(BoldGreen   "${Esc}[1;32m")
+  set(BoldYellow  "${Esc}[1;33m")
+  set(BoldBlue    "${Esc}[1;34m")
+  set(BoldMagenta "${Esc}[1;35m")
+  set(BoldCyan    "${Esc}[1;36m")
+  set(BoldWhite   "${Esc}[1;37m")
+endif()
 
-# required for no dependencies on Windows (other than ffmpeg shared libs)
+if (CMAKE_BUILD_TYPE STREQUAL "Debug")
+  message("${BoldRed}Building in Debug mode  (WARNING: ENABLES SANITIZERS AND LIBASSERT -- INCURS EXTRA RUNTIME OVERHEAD)${ColorReset}")
 
-# Turning off exceptions causes the program to abort
-# if an exception is thrown.
-# add_compile_options(-fno-exceptions -fno-rtti)
-# add_link_options(-fno-exceptions -fno-rtti)
+  add_compile_options(-fsanitize=undefined -fsanitize=address -fsanitize=bounds -fsanitize=signed-integer-overflow,null,alignment -fno-sanitize-recover=null -fsanitize-trap=alignment -fno-omit-frame-pointer)
+  add_link_options   (-fsanitize=undefined -fsanitize=address -fsanitize=bounds -fsanitize=signed-integer-overflow,null,alignment -fno-sanitize-recover=null -fsanitize-trap=alignment -fno-omit-frame-pointer)
+
+  if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    add_compile_options(-fsanitize=unsigned-integer-overflow -fsanitize=local-bounds)
+    add_link_options   (-fsanitize=unsigned-integer-overflow -fsanitize=local-bounds)
+  endif()
+
+  include(FetchContent)
+  FetchContent_Declare(
+    libassert
+    GIT_REPOSITORY https://github.com/jeremy-rifkin/libassert.git
+    GIT_TAG        v2.0.1 # <HASH or TAG>
+  )
+  FetchContent_MakeAvailable(libassert)
+endif()
+
 if(NOT CONFIG_MSYS_UCRT64)
   find_package(PkgConfig REQUIRED)
   pkg_check_modules(LIBAV REQUIRED IMPORTED_TARGET
@@ -71,4 +97,8 @@ if(CONFIG_MSYS_UCRT64)
   target_link_libraries( DiViEn -lstdc++ wsock32 ws2_32)
 else()
   target_link_libraries( DiViEn PkgConfig::LIBAV )
+endif()
+
+if (CMAKE_BUILD_TYPE STREQUAL "Debug")
+  target_link_libraries(DiViEn libassert::assert)
 endif()

@@ -57,7 +57,7 @@ fix_broken_segments(unsigned int num_segments,
         printf("  CAT[%d, %d] : %d pkts (%d decodable)\n", low, high,
                res.frame_count + res.nb_discarded, res.frame_count);
 
-        DvAssert(res.nb_discarded == 0);
+        DvAssert2(res.nb_discarded == 0);
     };
 
     unsigned int framesum = 0;
@@ -92,7 +92,7 @@ fix_broken_segments(unsigned int num_segments,
         p_offset += frames.frame_count + frames.nb_discarded;
 
         if (i == 0) [[unlikely]] {
-            DvAssert(frames.nb_discarded == 0);
+            DvAssert2(frames.nb_discarded == 0);
         }
         // Ideally we should manually split up the loop with lambdas and such.
         // But realistically it doesn't actually matter.
@@ -131,7 +131,7 @@ fix_broken_segments(unsigned int num_segments,
 
         // frame count + discarded gives total packet count (guaranteed)
 
-        DvAssert(frames.frame_count > 0);
+        DvAssert2(frames.frame_count > 0);
         framesum += frames.frame_count;
     }
 

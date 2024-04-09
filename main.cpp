@@ -360,7 +360,23 @@ struct EncoderContext {
             DvAssert(strlen(key) >= 1);
             DvAssert(strlen(value) >= 1);
             DvAssert(key[0] == '-');
-            DvAssert(av_opt_set(avcc->priv_data, key + 1, value, 0) == 0);
+            int ret = av_opt_set(avcc->priv_data, key + 1, value, 0);
+            const char* err = nullptr;
+            // TODO: come up with mechanism to integrate the progress bar
+            // printing, so the two don't conflict.
+            if (ret == AVERROR_OPTION_NOT_FOUND) {
+                err = "option not found";
+            } else if (ret == AVERROR(ERANGE)) {
+                err = "value out of range";
+            } else if (ret == AVERROR(EINVAL)) {
+                err = "invalid value";
+            } else {
+                err = "unspecified error";
+            }
+            if (ret) {
+                fprintf(stderr, "\n\nWARNING: Failed to set %s=%s: %s\n\n", key,
+                        value, err);
+            }
         }
 
         int ret = avcodec_open2(avcc, codec, nullptr);
@@ -1868,7 +1884,7 @@ int try_parse_uint(unsigned int& result, const char* sp,
     std::string_view str = sp;
     unsigned int value = 0;
     auto [ptr, ec] =
-        std::from_chars(str.data(), str.data() + str.size(), value);
+        std::from_chars(str.data(), str.data() + str.size(), value, 10);
 
     if (ec == std::errc()) {
         result = value;
@@ -1902,7 +1918,7 @@ int main(int argc, char* argv[]) {
               "          -bsize  <num_frames>      Set frame buffer size (chunk size) for each worker\n"
               "          -c:v    <codec_name>      Set codec for encoding [default: libx264]\n"
               "          -ff     <args> --         List of arguments to pass, delimited by -- \n"
-              "             ex:                     -ff -crf 30 -preset veryfast\n"
+              "             ex:                     -ff -crf 30 -preset veryfast --\n"
               );
         // clang-format on
 
@@ -2010,8 +2026,16 @@ int main(int argc, char* argv[]) {
                     }
                     arg_i++;
                     ff_enc_first_param = &argv[arg_i];
-                    for (; arg_i < (size_t)argc &&
-                           std::string_view(argv[arg_i]) != "--";
+                    // TODO: remove requirement of delimiter
+                    // use perfect hash function and figure out
+                    // when args stop based on when argument is then arg to
+                    // divien. I think
+                    // strcmp is better here since we don't have to calculate
+                    // strlen() separately.
+                    // OTOH, strlen() + == would have much better data
+                    // parallelism...
+                    for (;
+                         arg_i < (size_t)argc && strcmp(argv[arg_i], "--") != 0;
                          arg_i++) {
                         ff_enc_n_params++;
                     }
@@ -2107,9 +2131,9 @@ int main(int argc, char* argv[]) {
                 const char* value = ff_enc_first_param[2 * i + 1];
                 validate_param(key);
                 validate_param(value);
-                if (key[0] != '-') {
-                    printf(DIVIEN
-                           ": Error: arguments for -ff must start with '-'.\n");
+                if (key[0] != '-') [[unlikely]] {
+                    w_err(DIVIEN
+                          ": Error: arguments for -ff must start with '-'.\n");
                     return -1;
                 }
             }
