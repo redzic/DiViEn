@@ -52,7 +52,7 @@ Specify custom arguments and threading options with x265:
 ./DiViEn -i <path/to/input.mp4> -w 8 -c:v libx265 -ff -crf 25 -preset veryfast -x265-params pools=none:frame-threads=2
 ```
 
-Note that the `-tpw` (threads per worker) option does not always correlate with encoder-specific options. `-tpw` corresponds with the `-threads` option in ffmpeg. Prefer encoder-specific options for threading if available.
+Note that the `-tpw` (threads per worker) option does not always correlate with encoder-specific options. `-tpw` corresponds with the `-threads` option in ffmpeg (when applied to the encoder). Prefer encoder-specific options for threading if available. Note that decoder threading is always set to automatic selection, regardless of any command-line options specified.
 
 The template for the output file name is `<input_file_name>_<encoder_name>.mp4`. DiViEn will automatically create a temporary folder for the chunks. The temporary folder is not deleted after encoding, and if the folder already exists when DiViEn runs, DiViEn will overwrite the chunks. (This may change in the future.)
 
