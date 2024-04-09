@@ -38,21 +38,23 @@ Basic usage:
 ./DiViEn -i <path/to/input.mp4>
 ```
 
-Specify arguments (e.g., 8 workers, 4 threads per worker, libaom-av1, custom encoding params):
+To specify custom encoder arguments, use the `-ff` option, followed by a list of ffmpeg-style arguments, followed by the delimiter `--`. After the delimiter, arguments will be interpreted as arguments to DiViEn. The delimiter can be omitted if `-ff` was the last option specified.
+
+Specify arguments (e.g., 8 workers, 120 frame buffer size per worker, libaom-av1, custom encoding params):
 
 ```
-./DiViEn -i <path/to/input.mp4> -w 8 -c:v libaom-av1 -ff -crf 30 -cpu-used 6 -- -tpw 4
+./DiViEn -i <path/to/input.mp4> -w 8 -c:v libaom-av1 -ff -crf 30 -cpu-used 6 -- -bsize 120
 ```
 
-Specify custom arguments and threading options with x265 (`--` can be omitted if `-ff` is at the end of the argument list):
+Specify custom arguments and threading options with x265:
 
 ```
 ./DiViEn -i <path/to/input.mp4> -w 8 -c:v libx265 -ff -crf 25 -preset veryfast -x265-params pools=none:frame-threads=2
 ```
 
-Note that the `-tpw` option does not always correlate with encoder-specific options. `-tpw` corresponds with the `-threads` option in ffmpeg. Prefer encoder-specific options for threading if available.
+Note that the `-tpw` (threads per worker) option does not always correlate with encoder-specific options. `-tpw` corresponds with the `-threads` option in ffmpeg. Prefer encoder-specific options for threading if available.
 
-The output will be in `standalone_output.mp4`.
+The template for the output file name is `<input_file_name>_<encoder_name>.mp4`. DiViEn will automatically create a temporary folder for the chunks. The temporary folder is not deleted after encoding, and if the folder already exists when DiViEn runs, DiViEn will overwrite the chunks. (This may change in the future.)
 
 The output file may not be fully compatible with some video players at the moment due to
 a lack of proper timestamps being set. This should be fixed in the future.
