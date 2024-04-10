@@ -1897,6 +1897,7 @@ int try_parse_uint(unsigned int& result, const char* sp,
     return -1;
 }
 
+// TODO: thread priority + thread affinity CLI options
 int main(int argc, char* argv[]) {
     if (argc < 2) {
         // TODO print this as help also
@@ -2066,10 +2067,17 @@ int main(int argc, char* argv[]) {
 #define PARSE_OPTIONAL_ARG(data_var, string_var, arg_name_macro)               \
     {                                                                          \
         if ((string_var) != nullptr) {                                         \
-            if (try_parse_uint(data_var, string_var, arg_name_macro) < 0) {    \
+            if (try_parse_uint(data_var, string_var, arg_name_macro) < 0)      \
+                [[unlikely]] {                                                 \
                 return -1;                                                     \
             }                                                                  \
         }                                                                      \
+    }
+
+#define VALIDATE_ARG_NONZERO(data_var, arg_name)                               \
+    if ((data_var) == 0) [[unlikely]] {                                        \
+        w_err(DIVIEN ": Error: " arg_name " cannot be 0\n");                   \
+        return -1;                                                             \
     }
 
             // default values
@@ -2077,28 +2085,17 @@ int main(int argc, char* argv[]) {
             unsigned int threads_per_worker = 4;
             unsigned int chunk_size = 250;
 
-            // TODO deduplicate code somehow
             // Does assigning string literal to variable give that
             // proper (static) lifetime? Need to know for macro purpose.
             // Ideally we assign to string_view though.
             PARSE_OPTIONAL_ARG(num_workers, num_workers_s, "-w");
-            if (num_workers == 0) [[unlikely]] {
-                w_err(DIVIEN ": Error: -w cannot be 0\n");
-                return -1;
-            }
+            VALIDATE_ARG_NONZERO(num_workers, "-w");
             // perhaps just rename this option -threads?
             PARSE_OPTIONAL_ARG(threads_per_worker, threads_per_worker_s,
                                "-tpw");
-            if (threads_per_worker == 0) [[unlikely]] {
-                w_err(DIVIEN ": Error: -tpw cannot be 0\n");
-                return -1;
-            }
+            VALIDATE_ARG_NONZERO(threads_per_worker, "-tpw");
             PARSE_OPTIONAL_ARG(chunk_size, framebuf_size_s, "-bsize");
-            if (chunk_size == 0) [[unlikely]] {
-                // TODO enforce this in some other struct as well
-                w_err(DIVIEN ": Error: -bsize cannot be 0\n");
-                return -1;
-            }
+            VALIDATE_ARG_NONZERO(chunk_size, "-bsize");
 
             // Now we need to validate the input we received.
             // TODO: move everything for CLI parsing into its own function.
