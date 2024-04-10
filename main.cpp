@@ -2043,8 +2043,7 @@ int main(int argc, const char* argv[]) {
         if (arg_i + 1 >= (size_t)argc) [[unlikely]] {                          \
             goto print_err;                                                    \
         }                                                                      \
-        (store_variable) = argv[arg_i + 1];                                    \
-        arg_i++;                                                               \
+        (store_variable) = argv[++arg_i];                                      \
     }
 
                 auto arg_sv = std::string_view(argv[arg_i]);
@@ -2156,14 +2155,13 @@ int main(int argc, const char* argv[]) {
             }
             // TODO validate that file ends with an extension
             if (output_path_s == nullptr) {
-                printf(DIVIEN_ERR
-                       "No output path specified. Please specify the "
-                       "output path after the encoder arguments.\n");
+                w_err(DIVIEN_ERR "No output path specified. Please specify the "
+                                 "output path after the encoder arguments.\n");
                 return -1;
             }
             if (input_path_s == nullptr) {
-                printf(DIVIEN_ERR "No input path provided. Please specify the "
-                                  "input path with -i.\n");
+                w_err(DIVIEN_ERR "No input path provided. Please specify the "
+                                 "input path with -i.\n");
                 return -1;
             }
 
