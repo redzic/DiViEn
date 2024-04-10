@@ -35,26 +35,24 @@ To run the local chunked encoder (standalone mode):
 Basic usage:
 
 ```
-./DiViEn -i <path/to/input.mp4>
+./DiViEn -i <path/to/input.mp4> <output_file>
 ```
-
-To specify custom encoder arguments, use the `-ff` option, followed by a list of ffmpeg-style arguments, followed by the delimiter `--`. After the delimiter, arguments will be interpreted as arguments to DiViEn. The delimiter can be omitted if `-ff` was the last option specified.
 
 Specify arguments (e.g., 8 workers, 120 frame buffer size per worker, libaom-av1, custom encoding params):
 
 ```
-./DiViEn -i <path/to/input.mp4> -w 8 -c:v libaom-av1 -ff -crf 30 -cpu-used 6 -- -bsize 120
+./DiViEn -i <path/to/input.mp4> -w 8 -bsize 120 -c:v libaom-av1 -crf 30 -cpu-used 6 <output_file>
 ```
 
 Specify custom arguments and threading options with x265:
 
 ```
-./DiViEn -i <path/to/input.mp4> -w 8 -c:v libx265 -ff -crf 25 -preset veryfast -x265-params pools=none:frame-threads=2
+./DiViEn -i <path/to/input.mp4> -w 8 -tpw 4 -c:v libx265 -crf 25 -preset veryfast -x265-params pools=none:frame-threads=2 <output_file>
 ```
 
-Note that the `-tpw` (threads per worker) option does not always correlate with encoder-specific options. `-tpw` corresponds with the `-threads` option in ffmpeg (when applied to the encoder). Prefer encoder-specific options for threading if available. Note that decoder threading is always set to automatic selection, regardless of any command-line options specified.
+All parameters after `-c:v <encoder>` are interpreted as arguments to the encoder, except for the last parameter which is interpreted as the output file.
 
-The template for the output file name is `<input_file_name>_<encoder_name>.mp4`. DiViEn will automatically create a temporary folder for the chunks. The temporary folder is not deleted after encoding, and if the folder already exists when DiViEn runs, DiViEn will overwrite the chunks. (This may change in the future.)
+Note that the `-tpw` (threads per worker) option does not always correlate with encoder-specific options. `-tpw` corresponds with the `-threads` option in ffmpeg (when applied to the encoder). Prefer encoder-specific options for threading if available. Note that decoder threading is always set to automatic selection, regardless of any command-line options specified.
 
 The output file may not be fully compatible with some video players at the moment due to
 a lack of proper timestamps being set. This should be fixed in the future.

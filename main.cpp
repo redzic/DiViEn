@@ -68,6 +68,10 @@ extern "C" {
 // #define ASIO_ENABLE_HANDLER_TRACKING
 
 #define DIVIEN "DiViEn"
+#define DIVIEN_ERR "DiViEn: Error: "
+#define DIVIEN_ABORT(msg)                                                      \
+    w_err("DiViEn: Error: " msg "\n");                                         \
+    return -1;
 
 #if defined(__ORDER_LITTLE_ENDIAN__) && defined(__ORDER_BIG_ENDIAN__) &&       \
     defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
@@ -139,6 +143,12 @@ auto dist_us(auto start, auto end) {
 }
 
 auto now() { return std::chrono::high_resolution_clock::now(); }
+
+// all these call malloc:
+// avcodec_send_frame():
+// avbuffer_realloc
+// av_packet_add_side_data
+// avcodec_default_get_encoder_buffer()
 
 // for chunked encoding
 struct EncodeLoopState {
@@ -300,13 +310,13 @@ AVPixelFormat av_pix_fmt_supported_version(AVPixelFormat pix_fmt) {
 // This is a REFERENCE to other existing data.
 struct EncoderOpts {
     const char* encoder_name = nullptr;
-    char** params = nullptr;
+    const char** params = nullptr;
     size_t n_param_pairs = 0;
 
     EncoderOpts() = delete;
 
-    explicit constexpr EncoderOpts(const char* encoder_name_, char** params_,
-                                   size_t n_param_pairs_)
+    explicit constexpr EncoderOpts(const char* encoder_name_,
+                                   const char** params_, size_t n_param_pairs_)
         : encoder_name(encoder_name_), params(params_),
           n_param_pairs(n_param_pairs_) {}
 };
@@ -698,6 +708,8 @@ chunked_encode_loop(EncoderOpts e_opts, const char* in_filename,
 
     auto start = now();
 
+    // so I think for thread affinity to work we will have to spawn different
+    // processes instead of threads. And somehow share memory between them.
     std::vector<std::thread> thread_vector{};
     thread_vector.reserve(state.num_workers);
 
@@ -1897,13 +1909,54 @@ int try_parse_uint(unsigned int& result, const char* sp,
     return -1;
 }
 
+#define SV(sv_var) (int)(sv_var).size(), (sv_var).data()
+
+void show_help_children(std::unordered_set<std::string_view>& params,
+                        const AVClass* av_class) {
+    DvAssert(av_class->option != nullptr);
+
+    if (av_class->option) {
+        params.reserve(64);
+        // av_opt_show2(&av_class, nullptr, flags, 0);
+
+        const AVOption* opt = nullptr;
+        while ((opt = av_opt_next(&av_class, opt))) {
+            // printf("Param: %s, %d\n", opt->name,
+            //        opt->type == AV_OPT_TYPE_CONST);
+            if (opt->type != AV_OPT_TYPE_CONST) {
+                params.insert(std::string_view(opt->name));
+            }
+        }
+    }
+
+    // TODO we don't need this right?
+    // void* iter = nullptr;
+    // const AVClass* child;
+    // while (child = av_opt_child_class_iterate(av_class, &iter)) {
+    //     show_help_children(child, flags);
+    // }
+}
+
+void print_help_encoder(const AVClass* av_class) {
+    DvAssert(av_class->option != nullptr);
+
+    if (av_class->option) {
+        av_opt_show2(&av_class, nullptr, -1, 0);
+    }
+}
+
 // TODO: thread priority + thread affinity CLI options
-int main(int argc, char* argv[]) {
+int main(int argc, const char* argv[]) {
+
+    // TODO could implement checking on our side with allowed list of values
+
     if (argc < 2) {
         // TODO print this as help also
         // clang-format off
         w_err(DIVIEN ": must specify at least 2 args.\n"
-              " Usage: ./DiViEn <mode> <args>\n\n"
+              " Usage: ./DiViEn <mode> <args>\n"
+              "        ./DiViEn [DiViEn args] -i <input> [-c:v <encoder>] [encoder args] <output>\n"
+              "\n"
               "Available modes:\n"
               "    server <video>   Run centralized server for distributed encoding (WARNING: NOT FULLY FUNCTIONAL)\n"
               "    client           Run client that connects to DiViEn server instance (WARNING: NOT FULLY FUNCTIONAL)\n"
@@ -1917,13 +1970,13 @@ int main(int argc, char* argv[]) {
               "                                        if available.\n"
               "          -bsize  <num_frames>      Set frame buffer size (chunk size) for each worker\n"
               "          -c:v    <codec_name>      Set codec for encoding [default: libx264]\n"
-              "          -ff     <args> --         List of arguments to pass, delimited by -- \n"
-              "             ex:                        -ff -crf 30 -preset veryfast --\n"
+              "          [encoder options]         List of arguments to pass to the encoder\n"
               );
         // clang-format on
 
         return -1;
     }
+    DvAssert(argc >= 2);
 
 #if defined(__unix__)
     struct sigaction sigIntHandler {};
@@ -1939,10 +1992,8 @@ int main(int argc, char* argv[]) {
     // so that we can handle multiple clients at once easily.
     // Or at least multithreading or whatever.
     // Honestly yeah let's just use async.
-    DvAssert(argc >= 2);
     auto mode = std::string_view(argv[1]);
     try {
-
         if (mode == "server") {
             if (argc < 3) {
                 w_err(
@@ -1965,40 +2016,39 @@ int main(int argc, char* argv[]) {
             // interpret as standalone mode otherwise
             // TODO perhaps ensure duplicate arguments don't exist
 
-            // We are only allowed to have one input path.
-            // TODO: consolidate this code
-            // TODO allow for other options besides -c:v that ffmpeg supports,
-            // like -vcodec
-            static constexpr std::string_view possible_args[] = {
-                "-i", "-w", "-tpw", "-bsize", "-c:v"};
-            size_t arg_errmsg = 0;
-
-            // required arguments
-            const char* input_path_s = nullptr;
             // optional params
-            const char* encoder_name_s = "libx264"; // default to libx264
+            const char* output_path_s = nullptr;
+            const char* input_path_s = nullptr;
+            const char* encoder_name_s = nullptr;
+
             const char* num_workers_s = nullptr;
             const char* threads_per_worker_s = nullptr;
             const char* framebuf_size_s = nullptr;
-            char** ff_enc_first_param = nullptr;
-            size_t ff_enc_n_params = 0;
+            const char** ff_enc_first_param = nullptr;
+            size_t ff_enc_n_param_pairs = 0;
 
-            DvAssert(argc >= 3);
+            // so we're going to parse the input file first, then output file
+            // options, then output file name
+
             // parse the rest of the options here
+
+            std::unordered_set<std::string_view> valid_opts{};
+            const AVCodec* codec = nullptr;
 
             for (size_t arg_i = 1; arg_i < (size_t)argc; arg_i++) {
 
                 // this is ugly but at least it works
 
-#define LENGTH_CHECK(idx_value, store_variable)                                \
+// TODO use goto to avoid code duplication later
+#define LENGTH_CHECK(store_variable)                                           \
     {                                                                          \
         if (arg_i + 1 >= (size_t)argc) {                                       \
-            arg_errmsg = (idx_value);                                          \
-            goto length_fail;                                                  \
+            printf(DIVIEN_ERR "No argument specified for %.*s.\n",             \
+                   SV(arg_sv));                                                \
+            return -1;                                                         \
         }                                                                      \
         (store_variable) = argv[arg_i + 1];                                    \
         arg_i++;                                                               \
-        continue;                                                              \
     }
 
                 auto arg_sv = std::string_view(argv[arg_i]);
@@ -2008,61 +2058,113 @@ int main(int argc, char* argv[]) {
                 // TODO: perhaps a deduplication technique would be to store
                 // the variables in an array of strings as well, so all
                 // information about the option comes from the same index.
-                if (arg_sv == possible_args[0]) {
-                    LENGTH_CHECK(0, input_path_s);
-                } else if (arg_sv == possible_args[1]) {
-                    LENGTH_CHECK(1, num_workers_s);
-                } else if (arg_sv == possible_args[2]) {
-                    LENGTH_CHECK(2, threads_per_worker_s);
-                } else if (arg_sv == possible_args[3]) {
-                    LENGTH_CHECK(3, framebuf_size_s);
-                } else if (arg_sv == possible_args[4]) {
-                    LENGTH_CHECK(4, encoder_name_s);
-                } else if (arg_sv == "-ff") {
-                    if (arg_i + 1 >= (size_t)argc) {
-                        printf(DIVIEN
-                               ": Error: No parameters specified for -ff.\n");
+                if (arg_sv == "-i") {
+                    LENGTH_CHECK(input_path_s);
+                } else if (arg_sv == "-w") {
+                    LENGTH_CHECK(num_workers_s);
+                } else if (arg_sv == "-tpw") {
+                    LENGTH_CHECK(threads_per_worker_s);
+                } else if (arg_sv == "-bsize") {
+                    LENGTH_CHECK(framebuf_size_s);
+                } else if (arg_sv == "-c:v") {
+                    // TODO allow -vcodec as well
+                    LENGTH_CHECK(encoder_name_s);
+
+                    codec = avcodec_find_encoder_by_name(encoder_name_s);
+                    if (!codec) {
+                        printf(DIVIEN_ERR "No codec '%s' found.\n",
+                               encoder_name_s);
                         return -1;
                     }
-                    arg_i++;
-                    ff_enc_first_param = &argv[arg_i];
-                    // TODO: remove requirement of delimiter
-                    // use perfect hash function and figure out
-                    // when args stop based on when argument is then arg to
-                    // divien. I think
-                    // strcmp is better here since we don't have to calculate
-                    // strlen() separately.
-                    // OTOH, strlen() + == would have much better data
-                    // parallelism...
-                    for (;
-                         arg_i < (size_t)argc && strcmp(argv[arg_i], "--") != 0;
-                         arg_i++) {
-                        ff_enc_n_params++;
-                    }
-                    // arg_i is now on "--", or at the end.
-                    continue;
-                    // TODO: later support detecting the exact options ffmpeg
-                    // supports so we don't have to do -ff.
-                    // LENGTH_CHECK(idx_value, store_variable)
+                    show_help_children(valid_opts, codec->priv_class);
+                    DbgDvAssert(valid_opts.size() != 0);
+
                 } else {
-                    printf("DiViEn: Unrecognized command-line option '%.*s'.\n",
-                           (int)arg_sv.size(), arg_sv.data());
-                    return -1;
+                    // arg_i is currently set to some other option
+                    // check if it's an encoder option
+                    // no more opts
+                    // last argument, interpret as output filename and stop
+                    // parsing
+                    if (arg_i == (size_t)argc - 1) {
+                        output_path_s = argv[arg_i];
+                        break;
+                    }
+
+                    // do not allow additional arguments if there was no
+                    // explicit encoder specified
+
+                    // TODO check for this better
+                    if (encoder_name_s == nullptr) {
+                        DIVIEN_ABORT("Arguments for encoder were provided "
+                                     "but no encoder was specified with -c:v");
+                    }
+
+                    DbgDvAssert(valid_opts.size() != 0);
+
+                    // guaranteed that arg_i is not the last argument here
+                    // since we handled that before
+
+                    // more options were specified
+                    ff_enc_n_param_pairs = ((size_t)argc - 2) - arg_i + 1;
+                    ff_enc_first_param = &argv[arg_i];
+                    if (ff_enc_n_param_pairs & 1) {
+                        DIVIEN_ABORT(
+                            DIVIEN_ERR
+                            "Mismatched parameters: odd number of parameters "
+                            "specified for encoder.\n"
+                            "  Encoder arguments must be a list of key-value "
+                            "pairs.\n  All parameters after DiViEn options and "
+                            "before the output file are interpreted as encoder "
+                            "arguments.");
+                    }
+
+                    for (size_t offi = 0; offi < ff_enc_n_param_pairs;
+                         offi += 2) {
+                        DbgDvAssert(offi + 1 < ff_enc_n_param_pairs);
+                        const char* key = ff_enc_first_param[offi];
+                        // const char* value = ff_enc_first_param[offi + 1];
+                        if (key[0] != '-') {
+                            DIVIEN_ABORT("Keys for encoder options must start "
+                                         "with '-'.");
+                        }
+                        DbgDvAssert(codec != nullptr);
+                        if (!valid_opts.contains(std::string_view(key + 1))) {
+                            printf(DIVIEN_ERR "Invalid option '%s' for encoder "
+                                              "%s.\n\nValid parameters:\n",
+                                   key + 1, encoder_name_s);
+                            print_help_encoder(codec->priv_class);
+                            return -1;
+                        }
+                    }
+                    // TODO clean this up
+                    ff_enc_n_param_pairs /= 2;
+
+                    output_path_s = argv[argc - 1];
+                    break;
                 }
-
-            length_fail:
-                printf("DiViEn: Error: No argument provided for %.*s.\n",
-                       (int)possible_args[arg_errmsg].size(),
-                       possible_args[arg_errmsg].data());
-
-                return -1;
             }
 
+            if (encoder_name_s == nullptr) {
+                encoder_name_s = "libx264";
+            }
+            // TODO validate that file ends with an extension
+            if (output_path_s == nullptr) {
+                printf("DiViEn: No output path specified. Please specify the "
+                       "output path after the encoder arguments.\n");
+                return -1;
+            }
             if (input_path_s == nullptr) {
                 printf("DiViEn: No input path provided. Please specify the "
                        "input path with -i.\n");
                 return -1;
             }
+            if (encoder_name_s == nullptr) {
+                printf("DiViEn: No encoder. Please specify the "
+                       "encoder with -c:v.\n");
+                return -1;
+            }
+
+            printf("Using output file '%s'\n", output_path_s);
 
 #define PARSE_OPTIONAL_ARG(data_var, string_var, arg_name_macro)               \
     {                                                                          \
@@ -2103,50 +2205,13 @@ int main(int argc, char* argv[]) {
             // TODO: we need to assert what was null and what wasn't.
 
             DvAssert(input_path_s != nullptr);
+            DvAssert(output_path_s != nullptr);
 
             // TODO rename variables to be less confusing
             printf("Using %u workers (%u threads per worker), chunk size "
                    "= %u "
                    "frames per worker\nRunning in standalone mode [%s]\n",
                    num_workers, threads_per_worker, chunk_size, encoder_name_s);
-
-            if (ff_enc_n_params & 1) {
-                printf("DiViEn: Error: -ff: Odd number of parameters specified "
-                       "(mismatched parameters)\n"
-                       "  -ff arguments must be a list of key-value pairs.\n");
-                return -1;
-            }
-            // now equal to the number of pairs
-            DvAssert((ff_enc_n_params == 0) ^ (ff_enc_first_param != nullptr));
-            ff_enc_n_params /= 2;
-            for (size_t i = 0; i < ff_enc_n_params; i++) {
-                auto validate_param = [](const char* param) {
-                    DvAssert(param != nullptr && strlen(param) >= 1);
-                };
-                const char* key = ff_enc_first_param[2 * i];
-                const char* value = ff_enc_first_param[2 * i + 1];
-                validate_param(key);
-                validate_param(value);
-                if (key[0] != '-') [[unlikely]] {
-                    w_err(DIVIEN
-                          ": Error: arguments for -ff must start with '-'.\n");
-                    return -1;
-                }
-            }
-
-            // printing code
-            if (ff_enc_n_params) {
-                printf(DIVIEN ": -ff params (for encoder %s): ",
-                       encoder_name_s);
-            }
-            for (size_t i = 0; i < ff_enc_n_params; i++) {
-                const char* key = ff_enc_first_param[2 * i];
-                const char* value = ff_enc_first_param[2 * i + 1];
-                printf("%s %s ", key, value);
-            }
-            if (ff_enc_n_params) {
-                printf("\n");
-            }
 
             // TODO make sure this doesn't throw exceptions.
             auto vdec =
@@ -2169,23 +2234,14 @@ int main(int argc, char* argv[]) {
 
             av_log_set_level(AV_LOG_WARNING);
 
-            auto o_fname =
-                fs::path(input_path_s).filename().replace_extension();
-            {
-                fmt_buf suffix;
-                (void)snprintf(suffix.data(), suffix.size(), "_divien_%s.mp4",
-                               encoder_name_s);
-                o_fname.concat(suffix.data());
-            }
-
             EncoderOpts e_opts(encoder_name_s, ff_enc_first_param,
-                               ff_enc_n_params);
+                               ff_enc_n_param_pairs);
 
             // TODO make params and param pairs all a part of encoder options
             // struct that's passed around
-            DvAssert(chunked_encode_loop(
-                         e_opts, input_path_s, o_fname.generic_string().c_str(),
-                         dc, num_workers, chunk_size, threads_per_worker) == 0);
+            DvAssert(chunked_encode_loop(e_opts, input_path_s, output_path_s,
+                                         dc, num_workers, chunk_size,
+                                         threads_per_worker) == 0);
 
             (void)fflush(stderr);
             (void)fflush(stdout);

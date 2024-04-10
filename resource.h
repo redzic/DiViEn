@@ -18,7 +18,7 @@ template <typename T, auto Alloc, auto Free> auto make_resource() {
 #ifdef NDEBUG
 constexpr inline void DvAssert(bool /*unused*/) {}
 #define DvAssert2 DvAssert
-#define DvAssert3(expr) ((void)0)
+#define DbgDvAssert(expr) ((void)0)
 #else // DEBUG
 #include <cassert>
 #include <libassert/assert.hpp>
