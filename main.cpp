@@ -70,7 +70,7 @@ extern "C" {
 #define DIVIEN "DiViEn"
 #define DIVIEN_ERR "DiViEn: Error: "
 #define DIVIEN_ABORT(msg)                                                      \
-    w_err("DiViEn: Error: " msg "\n");                                         \
+    w_err(DIVIEN_ERR msg "\n");                                                \
     return -1;
 
 #if defined(__ORDER_LITTLE_ENDIAN__) && defined(__ORDER_BIG_ENDIAN__) &&       \
@@ -1995,8 +1995,8 @@ int main(int argc, const char* argv[]) {
     try {
         if (mode == "server") {
             if (argc < 3) {
-                w_err(
-                    "DiViEn: must specify the input video for server mode.\n");
+                w_err(DIVIEN_ERR
+                      "Must specify an input video for server mode.\n");
                 return -1;
             }
 
@@ -2156,18 +2156,14 @@ int main(int argc, const char* argv[]) {
             }
             // TODO validate that file ends with an extension
             if (output_path_s == nullptr) {
-                printf("DiViEn: No output path specified. Please specify the "
+                printf(DIVIEN_ERR
+                       "No output path specified. Please specify the "
                        "output path after the encoder arguments.\n");
                 return -1;
             }
             if (input_path_s == nullptr) {
-                printf("DiViEn: No input path provided. Please specify the "
-                       "input path with -i.\n");
-                return -1;
-            }
-            if (encoder_name_s == nullptr) {
-                printf("DiViEn: No encoder. Please specify the "
-                       "encoder with -c:v.\n");
+                printf(DIVIEN_ERR "No input path provided. Please specify the "
+                                  "input path with -i.\n");
                 return -1;
             }
 
@@ -2255,7 +2251,7 @@ int main(int argc, const char* argv[]) {
         }
 
     } catch (std::exception& e) {
-        printf("DiViEn: Exception occurred: %s\n", e.what());
+        printf(DIVIEN_ERR "Exception occurred: %s\n", e.what());
     }
 }
 
