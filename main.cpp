@@ -101,6 +101,8 @@ namespace {
 
 #define AlwaysInline __attribute__((always_inline)) inline
 
+#define SV(sv_var) (int)(sv_var).size(), (sv_var).data()
+
 AlwaysInline void w_err(std::string_view sv) {
     write(STDERR_FILENO, sv.data(), sv.size());
 }
@@ -204,8 +206,7 @@ auto chunk_fname(std::string_view folder_name, std::string_view prefix,
                  unsigned int chunk_idx) {
     std::array<char, 512> buf;
     (void)snprintf(buf.data(), buf.size(), "%.*s%.*s_chunk_%u.mp4",
-                   (int)folder_name.size(), folder_name.data(),
-                   (int)prefix.size(), prefix.data(), chunk_idx);
+                   SV(folder_name), SV(prefix), chunk_idx);
     return buf;
 }
 
@@ -1893,26 +1894,24 @@ int try_parse_uint(unsigned int& result, const char* sp,
             (void)fprintf(stderr,
                           DIVIEN ": Error: Argument for %.*s: argument "
                                  "contains non-digit characters\n",
-                          (int)argname.size(), argname.data());
+                          SV(argname));
             return -1;
         }
         return 0;
     } else if (ec == std::errc::invalid_argument) {
         (void)fprintf(stderr,
                       DIVIEN ": Error: Argument for %.*s: invalid argument\n",
-                      (int)argname.size(), argname.data());
+                      SV(argname));
     } else if (ec == std::errc::result_out_of_range) {
         (void)fprintf(stderr,
                       DIVIEN ": Error: Argument for %.*s: value out of range\n",
-                      (int)argname.size(), argname.data());
+                      SV(argname));
     }
     return -1;
 }
 
-#define SV(sv_var) (int)(sv_var).size(), (sv_var).data()
-
-void show_help_children(std::unordered_set<std::string_view>& params,
-                        const AVClass* av_class) {
+void find_valid_opts(std::unordered_set<std::string_view>& params,
+                     const AVClass* av_class) {
     DvAssert(av_class->option != nullptr);
 
     if (av_class->option) {
@@ -2039,13 +2038,10 @@ int main(int argc, const char* argv[]) {
 
                 // this is ugly but at least it works
 
-// TODO use goto to avoid code duplication later
 #define LENGTH_CHECK(store_variable)                                           \
     {                                                                          \
-        if (arg_i + 1 >= (size_t)argc) {                                       \
-            printf(DIVIEN_ERR "No argument specified for %.*s.\n",             \
-                   SV(arg_sv));                                                \
-            return -1;                                                         \
+        if (arg_i + 1 >= (size_t)argc) [[unlikely]] {                          \
+            goto print_err;                                                    \
         }                                                                      \
         (store_variable) = argv[arg_i + 1];                                    \
         arg_i++;                                                               \
@@ -2066,19 +2062,25 @@ int main(int argc, const char* argv[]) {
                     LENGTH_CHECK(threads_per_worker_s);
                 } else if (arg_sv == "-bsize") {
                     LENGTH_CHECK(framebuf_size_s);
-                } else if (arg_sv == "-c:v") {
-                    // TODO allow -vcodec as well
+                } else if (arg_sv == "-c:v" || arg_sv == "-vcodec" ||
+                           arg_sv == "-codec:v") {
+                    if (encoder_name_s != nullptr) [[unlikely]] {
+                        printf(DIVIEN_ERR "Encoder already specified, cannot "
+                                          "provide %.*s\n",
+                               SV(arg_sv));
+                        return -1;
+                    }
+
                     LENGTH_CHECK(encoder_name_s);
 
                     codec = avcodec_find_encoder_by_name(encoder_name_s);
-                    if (!codec) {
+                    if (!codec) [[unlikely]] {
                         printf(DIVIEN_ERR "No codec '%s' found.\n",
                                encoder_name_s);
                         return -1;
                     }
-                    show_help_children(valid_opts, codec->priv_class);
+                    find_valid_opts(valid_opts, codec->priv_class);
                     DbgDvAssert(valid_opts.size() != 0);
-
                 } else {
                     // arg_i is currently set to some other option
                     // check if it's an encoder option
@@ -2142,6 +2144,11 @@ int main(int argc, const char* argv[]) {
                     output_path_s = argv[argc - 1];
                     break;
                 }
+                continue;
+            print_err:
+                printf(DIVIEN_ERR "No argument specified for %.*s.\n",
+                       SV(arg_sv));
+                return -1;
             }
 
             if (encoder_name_s == nullptr) {
@@ -2223,7 +2230,7 @@ int main(int argc, const char* argv[]) {
                 // a bunch of code.
                 auto m = err.errmsg();
                 printf("Failed to open input file '%s': %.*s\n", input_path_s,
-                       (int)m.size(), m.data());
+                       SV(m));
                 return -1;
             }
 
