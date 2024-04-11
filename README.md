@@ -47,7 +47,7 @@ Specify arguments (e.g., 8 workers, 120 frame buffer size per worker, libaom-av1
 Specify custom arguments and threading options with x265:
 
 ```
-./DiViEn -i <path/to/input.mp4> -w 8 -tpw 4 -c:v libx265 -crf 25 -preset veryfast -x265-params pools=none:frame-threads=2 <output_file>
+./DiViEn -i <path/to/input.mp4> -w 8 -tpw 4 -c:v libx265 -crf 25 -preset veryfast -x265-params pools=2 <output_file>
 ```
 
 All parameters after `-c:v <encoder>` are interpreted as arguments to the encoder, except for the last parameter which is interpreted as the output file.
