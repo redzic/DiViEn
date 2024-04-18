@@ -47,12 +47,12 @@ Specify arguments (e.g., 8 workers, 120 frame buffer size per worker, libaom-av1
 Specify custom arguments and threading options with x265:
 
 ```
-./DiViEn -i <path/to/input.mp4> -w 8 -tpw 4 -c:v libx265 -crf 25 -preset veryfast -x265-params pools=2 <output_file>
+./DiViEn -i <path/to/input.mp4> -w 8 -threads 4 -c:v libx265 -crf 25 -preset veryfast -x265-params pools=2 <output_file>
 ```
 
 All parameters after `-c:v <encoder>` are interpreted as arguments to the encoder, except for the last parameter which is interpreted as the output file.
 
-Note that the `-tpw` (threads per worker) option does not always correlate with encoder-specific options. `-tpw` corresponds with the `-threads` option in ffmpeg (when applied to the encoder). Prefer encoder-specific options for threading if available. Note that decoder threading is always set to automatic selection, regardless of any command-line options specified.
+Note that the `-threads` (threads per worker) option does not always correlate with encoder-specific options. It functions the same as the similarly-named `-threads` option in ffmpeg. Prefer encoder-specific options for threading if available. Note that decoder threading is always set to automatic selection, regardless of any command-line options specified.
 
 The output file may not be fully compatible with some video players at the moment due to
 a lack of proper timestamps being set. This should be fixed in the future.

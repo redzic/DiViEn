@@ -1961,15 +1961,15 @@ int main(int argc, const char* argv[]) {
               "    client           Run client that connects to DiViEn server instance (WARNING: NOT FULLY FUNCTIONAL)\n"
               "    (standalone)     Encode input video locally. This option is implied if no mode is specified.\n"
               "        args:\n"
-              "          -i      <input_path>      Path to input video to encode [required]\n"
-              "          -w      <num_workers>     Set number of workers (parallel encoder instances)\n"
-              "          -tpw    <num_threads>     Set number of threads per worker\n"
+              "          -i        <input_path>      Path to input video to encode [required]\n"
+              "          -w        <num_workers>     Set number of workers (parallel encoder instances)\n"
+              "          -threads  <num_threads>     Set number of threads per worker\n"
               "                                        NOTE: This does not always correlate to the encoder's threading\n"
               "                                        options. Prefer manually specifying encoder-specific options\n"
               "                                        if available.\n"
-              "          -bsize  <num_frames>      Set frame buffer size (chunk size) for each worker\n"
-              "          -c:v    <codec_name>      Set codec for encoding [default: libx264]\n"
-              "          [encoder options]         List of arguments to pass to the encoder\n"
+              "          -bsize    <num_frames>      Set frame buffer size (chunk size) for each worker\n"
+              "          -c:v      <codec_name>      Set codec for encoding [default: libx264]\n"
+              "          [encoder options]           List of arguments to pass to the encoder\n"
               );
         // clang-format on
 
@@ -2000,6 +2000,9 @@ int main(int argc, const char* argv[]) {
                 return -1;
             }
 
+            // DISTRIBUTED IDEA
+            // use async file IO from ASIO, to avoid blocking other clients
+            // from receiving data in buffers and stuff
             run_server_full(argv[2]);
         } else if (mode == "client") {
             // FrameAccurateWorkItem work{
@@ -2057,7 +2060,7 @@ int main(int argc, const char* argv[]) {
                     LENGTH_CHECK(input_path_s);
                 } else if (arg_sv == "-w") {
                     LENGTH_CHECK(num_workers_s);
-                } else if (arg_sv == "-tpw") {
+                } else if (arg_sv == "-threads") {
                     LENGTH_CHECK(threads_per_worker_s);
                 } else if (arg_sv == "-bsize") {
                     LENGTH_CHECK(framebuf_size_s);
@@ -2195,8 +2198,8 @@ int main(int argc, const char* argv[]) {
             VALIDATE_ARG_NONZERO(num_workers, "-w");
             // perhaps just rename this option -threads?
             PARSE_OPTIONAL_ARG(threads_per_worker, threads_per_worker_s,
-                               "-tpw");
-            VALIDATE_ARG_NONZERO(threads_per_worker, "-tpw");
+                               "-threads");
+            VALIDATE_ARG_NONZERO(threads_per_worker, "-threads");
             PARSE_OPTIONAL_ARG(chunk_size, framebuf_size_s, "-bsize");
             VALIDATE_ARG_NONZERO(chunk_size, "-bsize");
 
