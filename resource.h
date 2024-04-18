@@ -11,8 +11,8 @@ template <typename T, auto Alloc, auto Free> auto make_resource() {
 // TODO make this as always-inline function that doesn't call extra
 // constructors and stuff
 #define make_file(variable_name, file_name, file_args)                         \
-    std::unique_ptr<FILE, decltype(&fclose)> variable_name(                    \
-        fopen(file_name, file_args), fclose)
+    std::unique_ptr<FILE, decltype([](FILE* ptr) { fclose(ptr); })>            \
+    variable_name(fopen(file_name, file_args))
 
 // TODO how do I disable warnings?
 #ifdef NDEBUG

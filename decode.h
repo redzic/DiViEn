@@ -33,10 +33,10 @@ extern "C" {
 // TODO possibly rename this for generalized libavcodec errors
 struct DecoderCreationError {
     enum DCErrorType : uint8_t {
-        AVError = 0,
         AllocationFailure,
         NoVideoStream,
         NoDecoderAvailable,
+        AVError,
     } type;
     int averror = 0;
 
@@ -46,7 +46,7 @@ struct DecoderCreationError {
             [AllocationFailure] = "Allocation Failure in decoder construction",
             [NoVideoStream] = "No video stream exists in input file",
             [NoDecoderAvailable] = "No decoder available for codec",
-            // [AVError] intentionally omitted
+            // [AVError] = "",
         };
 
         // change this to the longest string in the array
@@ -55,7 +55,7 @@ struct DecoderCreationError {
 
         std::array<char, AV_ERROR_MAX_STRING_SIZE> errbuf{};
 
-        if (this->type == AVError) {
+        if (averror) {
             DvAssert(averror != 0);
             av_make_error_string(errbuf.data(), errbuf.size(), averror);
         } else {
