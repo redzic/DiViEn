@@ -1,6 +1,7 @@
 #include "segment.h"
 #include "concat.h"
 #include "decode.h"
+#include "ffutil.h"
 
 extern "C" {
 #include "ff_segment_muxer.h"
@@ -231,9 +232,6 @@ int segment_video(const char* in_filename, const char* out_filename,
         }
     }
 
-    // yeah so we REALLY can't rely on filenames to correctly
-    // detect the number of segments written, unfortunately.
-
     ret = avformat_write_header(ofmt_ctx, nullptr);
     if (ret < 0) {
         fprintf(stderr, "Error occurred when opening output file\n");
@@ -292,9 +290,7 @@ end:
     avformat_free_context(ofmt_ctx);
 
     if (ret < 0 && ret != AVERROR_EOF) {
-        std::array<char, AV_ERROR_MAX_STRING_SIZE> errbuf{};
-        av_make_error_string(errbuf.data(), errbuf.size(), ret);
-        (void)fprintf(stderr, "Error occurred: %s\n", errbuf.data());
+        (void)fprintf(stderr, "Error occurred: %s\n", av_strerr(ret).data());
 
         return ret;
     }

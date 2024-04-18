@@ -1,5 +1,6 @@
 #pragma once
 
+#include "resource.h"
 #include "util.h"
 #include <array>
 #include <cstddef>
@@ -32,22 +33,41 @@ extern "C" {
 // TODO possibly rename this for generalized libavcodec errors
 struct DecoderCreationError {
     enum DCErrorType : uint8_t {
+        AVError = 0,
         AllocationFailure,
         NoVideoStream,
         NoDecoderAvailable,
-        AVError
     } type;
     int averror = 0;
 
-    [[nodiscard]] constexpr std::string_view errmsg() const {
+    [[nodiscard]] constexpr std::array<char, AV_ERROR_MAX_STRING_SIZE>
+    errmsg() const {
         static constexpr std::string_view errmsg_sv[] = {
             [AllocationFailure] = "Allocation Failure in decoder construction",
             [NoVideoStream] = "No video stream exists in input file",
             [NoDecoderAvailable] = "No decoder available for codec",
-            [AVError] = "Unspecified AVError occurred",
+            // [AVError] intentionally omitted
         };
 
-        return errmsg_sv[this->type];
+        // change this to the longest string in the array
+        static_assert(errmsg_sv[AllocationFailure].size() <
+                      AV_ERROR_MAX_STRING_SIZE);
+
+        std::array<char, AV_ERROR_MAX_STRING_SIZE> errbuf{};
+
+        if (this->type == AVError) {
+            DvAssert(averror != 0);
+            av_make_error_string(errbuf.data(), errbuf.size(), averror);
+        } else {
+            DvAssert(averror == 0);
+            auto msg = errmsg_sv[this->type];
+            memcpy(errbuf.data(), msg.data(), msg.size());
+            DvAssert(errbuf.size() > msg.size());
+            // add null terminator
+            errbuf[msg.size()] = '\0';
+        }
+
+        return errbuf;
     }
 };
 
@@ -56,10 +76,6 @@ struct DecoderCreationError {
 // called.
 
 // maybe add ctrl+C interrupt that just stops and flushes all packets so far?
-
-// constexpr size_t CHUNK_FRAME_SIZE = 60;
-// constexpr size_t NUM_WORKERS = 4;
-// constexpr size_t THREADS_PER_WORKER = 4;
 
 // constexpr size_t FRAMEBUF_SIZE = CHUNK_FRAME_SIZE * NUM_WORKERS;
 // using FrameBuf = std::array<AVFrame*, FRAMEBUF_SIZE>;

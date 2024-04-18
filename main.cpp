@@ -1,5 +1,3 @@
-// gonna have to obviously disable on some configurations and whatever
-
 // pagecache + bypassing cache?
 
 #include <asio.hpp>
@@ -14,7 +12,6 @@
 #include <asio/use_awaitable.hpp>
 #include <asio/write.hpp>
 
-// ------------------
 #include <algorithm>
 #include <array>
 #include <cerrno>
@@ -44,12 +41,12 @@
 namespace fs = std::filesystem;
 
 #include "decode.h"
+#include "ffutil.h"
 #include "resource.h"
 #include "segment.h"
 #include "util.h"
 
 extern "C" {
-
 #include <libavcodec/avcodec.h>
 #include <libavcodec/codec.h>
 #include <libavcodec/packet.h>
@@ -65,13 +62,13 @@ extern "C" {
 #include <libavutil/rational.h>
 }
 
-// #define ASIO_ENABLE_HANDLER_TRACKING
-
 #define DIVIEN "DiViEn"
 #define DIVIEN_ERR "DiViEn: Error: "
 #define DIVIEN_ABORT(msg)                                                      \
-    w_err(DIVIEN_ERR msg "\n");                                                \
-    return -1;
+    {                                                                          \
+        w_err(DIVIEN_ERR msg "\n");                                            \
+        return -1;                                                             \
+    }
 
 #if defined(__ORDER_LITTLE_ENDIAN__) && defined(__ORDER_BIG_ENDIAN__) &&       \
     defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
@@ -97,11 +94,6 @@ extern "C" {
 namespace {
 
 #define ERASE_LINE_ANSI "\x1B[1A\x1B[2K" // NOLINT
-// #define ERASE_LINE_ANSI "" // NOLINT
-
-#define AlwaysInline __attribute__((always_inline)) inline
-
-#define SV(sv_var) (int)(sv_var).size(), (sv_var).data()
 
 AlwaysInline void w_err(std::string_view sv) {
     write(STDERR_FILENO, sv.data(), sv.size());
@@ -110,15 +102,9 @@ AlwaysInline void w_err(std::string_view sv) {
 // so it seems like you have to call
 // unref before you reuse AVPacket or AVFrame
 
-void segvHandler(int /*unused*/) {
+void segv_handler(int /*unused*/) {
     w_err("Segmentation fault occurred. Please file a bug report on GitHub.\n");
     exit(EXIT_FAILURE); // NOLINT
-}
-
-auto av_strerr(int averror) {
-    std::array<char, AV_ERROR_MAX_STRING_SIZE> errbuf;
-    av_make_error_string(errbuf.data(), errbuf.size(), averror);
-    return errbuf;
 }
 
 // Idea:
@@ -1748,20 +1734,17 @@ awaitable<void> run_client(asio::io_context& io_context, tcp_socket socket,
 #include <cstdlib>
 #include <unistd.h>
 
-void my_handler(int s) {
-    printf("Caught signal %d\n", s);
-    exit(EXIT_FAILURE);
-}
+// TODO handle sigsegv as well
+__attribute__((cold)) void sigint_handler(int) { exit(EXIT_FAILURE); }
 
 // TODO handle client disconnecting,
 // add that back to the chunk queue
 
-// TODO make protocol ask client
-// which chunks it's missing.
-// and only send
-
 // for verify mode/dont trust we could request
 // a hash of the segments to make sure.
+// or perhaps just don't support untrusted workers.
+// and just handle authentication to connect (password
+// or whatever).
 
 void run_server_full(const char* from_file) {
     printf("Preparing and segmenting video file '%s'...\n", from_file);
@@ -1980,7 +1963,7 @@ int main(int argc, const char* argv[]) {
 #if defined(__unix__)
     struct sigaction sigIntHandler {};
 
-    sigIntHandler.sa_handler = my_handler;
+    sigIntHandler.sa_handler = sigint_handler;
     sigemptyset(&sigIntHandler.sa_mask);
     sigIntHandler.sa_flags = 0;
     sigaction(SIGINT, &sigIntHandler, nullptr);
