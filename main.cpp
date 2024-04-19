@@ -1,37 +1,21 @@
-
-#include <array>
 #include <cerrno>
 #include <charconv>
-#include <chrono>
 #include <cmath>
-#include <condition_variable>
 #include <csignal>
 #include <cstddef>
-#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <filesystem>
-#include <fstream>
-#include <iostream>
-#include <mutex>
 #include <pthread.h>
-#include <span>
 #include <system_error>
-#include <thread>
 #include <unistd.h>
 #include <unordered_set>
 #include <variant>
-#include <vector>
-
-namespace fs = std::filesystem;
 
 #include "common.h"
 #include "decode.h"
 #include "encode.h"
 #include "network.h"
-#include "progress.h"
-#include "timing.h"
 #include "util.h"
 
 extern "C" {
