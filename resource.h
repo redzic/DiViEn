@@ -13,20 +13,3 @@ template <typename T, auto Alloc, auto Free> auto make_resource() {
 #define make_file(variable_name, file_name, file_args)                         \
     std::unique_ptr<FILE, decltype([](FILE* ptr) { fclose(ptr); })>            \
     variable_name(fopen(file_name, file_args))
-
-// TODO how do I disable warnings?
-#ifdef NDEBUG
-constexpr inline void DvAssert(bool /*unused*/) {}
-#define DvAssert2 DvAssert
-#define DbgDvAssert(expr) ((void)0)
-#else // DEBUG
-#include <cassert>
-#include <libassert/assert.hpp>
-// Regular assertion (side effects exist in debug mode), most common use case
-#define DvAssert DEBUG_ASSERT
-// Workaround for certain unsupported cases in libassert (e.g., bit fields)
-#define DvAssert2 assert
-// Debug assertion, expression and side effects deleted entirely in Release
-// mode.
-#define DbgDvAssert DEBUG_ASSERT
-#endif

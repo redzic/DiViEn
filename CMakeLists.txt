@@ -2,13 +2,35 @@ cmake_minimum_required(VERSION 3.26)
 
 project(DiViEn)
 
+# https://stackoverflow.com/questions/18968979/how-to-make-colorized-message-with-cmake
+if(NOT WIN32)
+  string(ASCII 27 Esc)
+  set(ColorReset  "${Esc}[m")
+  set(ColorBold   "${Esc}[1m")
+  set(Red         "${Esc}[31m")
+  set(BoldRed     "${Esc}[1;31m")
+  set(BoldGreen   "${Esc}[1;32m")
+  set(BoldYellow  "${Esc}[1;33m")
+  set(BoldBlue    "${Esc}[1;34m")
+  set(BoldMagenta "${Esc}[1;35m")
+  set(BoldCyan    "${Esc}[1;36m")
+  set(BoldWhite   "${Esc}[1;37m")
+endif()
+
 
 set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_BUILD_TYPE Release)
 # set(CMAKE_BUILD_TYPE Debug)
 # set(CMAKE_BUILD_TYPE RelWithDebInfo)
-set(CMAKE_BUILD_TYPE Release)
 
-set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
+set(CMAKE_EXPORT_COMPILE_COMMANDS TRUE)
+
+if (CMAKE_BUILD_TYPE STREQUAL "Release")
+  message("${BoldGreen}Building in Release mode [LTO enabled]${ColorReset}")
+
+  set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
+endif()
+
 set(CMAKE_COLOR_MAKEFILE TRUE)
 set(CMAKE_COLOR_DIAGNOSTICS ON)
 
@@ -31,20 +53,6 @@ if (CONFIG_MSYS_UCRT64)
   set(CMAKE_NO_SYSTEM_FROM_IMPORTED 1)
 endif()
 
-# https://stackoverflow.com/questions/18968979/how-to-make-colorized-message-with-cmake
-if(NOT WIN32)
-  string(ASCII 27 Esc)
-  set(ColorReset  "${Esc}[m")
-  set(ColorBold   "${Esc}[1m")
-  set(Red         "${Esc}[31m")
-  set(BoldRed     "${Esc}[1;31m")
-  set(BoldGreen   "${Esc}[1;32m")
-  set(BoldYellow  "${Esc}[1;33m")
-  set(BoldBlue    "${Esc}[1;34m")
-  set(BoldMagenta "${Esc}[1;35m")
-  set(BoldCyan    "${Esc}[1;36m")
-  set(BoldWhite   "${Esc}[1;37m")
-endif()
 
 # enable sanitizers and libassert in debug mode
 if (CMAKE_BUILD_TYPE STREQUAL "Debug")
@@ -94,9 +102,9 @@ endif()
 # for only part of the code? like the part that deals with ASIO.
 # I think it's possible.
 
-add_executable(DiViEn main.cpp decode.cpp segment.cpp)
+add_executable(DiViEn main.cpp decode.cpp segment.cpp encode.cpp network.cpp)
 
-target_compile_options(DiViEn PRIVATE -Wall -Wextra -Wformat -Wno-c99-designator )
+target_compile_options(DiViEn PRIVATE -Wall -Wextra -Wformat )
 if(ENABLE_IO_URING)
   target_link_libraries( DiViEn uring )
 endif()

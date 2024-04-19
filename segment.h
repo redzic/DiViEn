@@ -1,6 +1,6 @@
 #pragma once
 
-#include "resource.h"
+#include "util.h"
 #include <cstdint>
 #include <span>
 #include <vector>

@@ -1,3 +1,9 @@
-CompileFlags:                     # Tweak the parse settings
-  Add: [-std=gnu++2b, -Wall, -Wpedantic, -Wformat, -Wno-c99-designator] # treat all files as C++, enable more warnings
-  Compiler: clang++               # Change argv[0] of compile flags to `clang++`
+CompileFlags:
+  Compiler: clang++
+Diagnostics:
+  Suppress:
+  - readability-function-cognitive-complexity
+  - readability-implicit-bool-conversion
+  - cppcoreguidelines-macro-usage
+  - cppcoreguidelines-avoid-goto
+  - hicpp-avoid-goto
