@@ -26,6 +26,7 @@
 
 namespace fs = std::filesystem;
 
+#include "common.h"
 #include "decode.h"
 #include "encode.h"
 #include "network.h"
@@ -49,14 +50,6 @@ extern "C" {
 #include <libavutil/rational.h>
 }
 
-#define DIVIEN "DiViEn"
-#define DIVIEN_ERR "DiViEn: Error: "
-#define DIVIEN_ABORT(msg)                                                      \
-    {                                                                          \
-        w_err(DIVIEN_ERR msg "\n");                                            \
-        return -1;                                                             \
-    }
-
 #if defined(__ORDER_LITTLE_ENDIAN__) && defined(__ORDER_BIG_ENDIAN__) &&       \
     defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
 
@@ -77,11 +70,6 @@ extern "C" {
     "Unsupported architecture or compiler. Please try using the latest version of clang. If that does not work, please file a bug on github."
 
 #endif
-
-namespace {
-
-#define ERASE_LINE_ANSI "\x1B[1A\x1B[2K" // NOLINT
-// #define ERASE_LINE_ANSI "" // NOLINT
 
 AlwaysInline void w_err(std::string_view sv) {
     write(STDERR_FILENO, sv.data(), sv.size());
@@ -120,16 +108,6 @@ template <class> inline constexpr bool always_false_v = false;
 
 // we should probably also set timestamps properly.
 
-// TODO: make output filename configurable
-// the passed folder_name should include a slash
-auto chunk_fname(std::string_view folder_name, std::string_view prefix,
-                 unsigned int chunk_idx) {
-    std::array<char, 512> buf;
-    (void)snprintf(buf.data(), buf.size(), "%.*s%.*s_chunk_%u.mp4",
-                   SV(folder_name), SV(prefix), chunk_idx);
-    return buf;
-}
-
 // TODO ensure that two clients don't run in the same directory.
 // For now at least tell the user that they shouldn't do this.
 
@@ -153,249 +131,6 @@ auto chunk_fname(std::string_view folder_name, std::string_view prefix,
 // format is
 // "client_input_{idx}.mp4"
 // TODO: use concat filter for this part of the code.
-
-AlwaysInline int encode_chunk(std::string_view base_path,
-                              std::string_view prefix, unsigned int chunk_idx,
-                              std::span<AVFrame*> framebuf,
-                              EncodeLoopState& state, unsigned int n_threads,
-                              EncoderOpts e_opts, FrameRange frange) {
-    auto buf = chunk_fname(base_path, prefix, chunk_idx);
-    printf("framebuf size: %zu\n", framebuf.size());
-    dump_chunk(frange);
-    return encode_frames(buf.data(), framebuf, state, n_threads, e_opts);
-}
-
-// framebuf is start of frame buffer that worker can use
-// TODO pass n_threads and chunk size in with some shared state
-int worker_thread(std::string_view base_path, std::string_view prefix,
-                  unsigned int worker_id, DecodeContext& decoder,
-                  EncodeLoopState& state, EncoderOpts e_opts) {
-    while (true) {
-        for (size_t i = 0; i < state.chunk_frame_size; i++) {
-            size_t idx = (size_t)worker_id * state.chunk_frame_size + i;
-            if (avframe_has_buffer(decoder.framebuf[idx])) {
-                DvAssert(av_frame_make_writable(decoder.framebuf[idx]) == 0);
-            }
-        }
-
-        // should only access decoder once lock has been acquired
-        // uh should we replace with like unique_lock or lock_guard
-        // or something like that?
-        // idk how save this is
-        state.global_decoder_mutex.lock();
-
-        // decode CHUNK_FRAME_SIZE frames into frame buffer
-        int frames =
-            run_decoder(decoder, (size_t)worker_id * state.chunk_frame_size,
-                        state.chunk_frame_size);
-
-        // error decoding
-        if (frames <= 0) {
-            state.nb_threads_done++;
-            state.cv.notify_one();
-            state.global_decoder_mutex.unlock();
-            return frames;
-        }
-
-        // these accesses are behind mutex so we're all good
-        auto chunk_idx = state.global_chunk_id++;
-        // increment for next chunk
-
-        // can assume frames are available, so unlock the mutex so
-        // other threads can use the decoder
-        state.global_decoder_mutex.unlock();
-
-        DvAssert(state.chunk_frame_size != 0);
-        FrameRange frange = {.low = chunk_idx * state.chunk_frame_size,
-                             .high = chunk_idx * state.chunk_frame_size +
-                                     state.chunk_frame_size - 1};
-
-        // a little sketchy but in theory this should be fine
-        // since framebuf is never modified
-        int ret = encode_chunk(
-            base_path, prefix, chunk_idx,
-            {decoder.framebuf.data() +
-                 ((size_t)worker_id * (size_t)state.chunk_frame_size),
-             (size_t)frames},
-            state, state.n_threads, e_opts, frange);
-
-        if (ret != 0) {
-            // in theory... this shouldn't need to happen as this is an encoding
-            // error
-            // mutex was already unlocked so we don't unlock.
-
-            state.nb_threads_done++;
-
-            // in normal circumstances we return from infinite loop via decoding
-            // error (which we expect to be EOF).
-            state.cv.notify_one();
-
-            return ret;
-        }
-    }
-}
-
-// assume same naming convention
-// this is direct concatenation, nothing extra done to files.
-// hardcoded. TODO remove.
-// perhaps we could special case this for 1 input file.
-// TODO error handling
-void raw_concat_files(std::string_view base_path, std::string_view prefix,
-                      const char* out_filename, unsigned int num_files,
-                      bool delete_after = false) {
-    std::ofstream dst(out_filename, std::ios::binary);
-
-    for (unsigned int i = 0; i < num_files; i++) {
-        auto buf = chunk_fname(base_path, prefix, i);
-        std::ifstream src(buf.data(), std::ios::binary);
-        dst << src.rdbuf();
-        src.close();
-        // delete file after done
-        if (delete_after) {
-            DvAssert(std::remove(buf.data()) == 0);
-        }
-    }
-
-    dst.close();
-}
-
-} // namespace
-
-// TODO perhaps for tests we can try with lossless
-// encoding and compare video results.
-// perhaps the tests could use python scripts to call
-// the binary or something.
-
-// Maybe long term we could provide a C or C++ library.
-// (probaby C).
-// TODO move all the TODOs into a separate doc/file or something.
-
-// decodes everything
-// TODO need to make the output of this compatible with libav
-// logging stuff. Maybe I can do that with a callback
-// so that I can really handle it properly.
-// This relies on global state. Do not call this function
-// more than once.
-// There's some kind of stalling going on here.
-// TODO make option to test standalone encoder.
-// There's only supposed to be 487 frames on 2_3.
-
-// This function will create a base path.
-// params is for encoder options
-[[nodiscard]] int
-chunked_encode_loop(EncoderOpts e_opts, const char* in_filename,
-                    const char* out_filename, DecodeContext& d_ctx,
-                    unsigned int num_workers, unsigned int chunk_frame_size,
-                    unsigned int n_threads) {
-    // TODO avoid dynamic memory allocation here
-    auto base_path =
-        fs::path(in_filename).filename().replace_extension().generic_string();
-
-    // TODO technically could avoid copy here by using same pointer
-    auto prefix = base_path;
-
-    // TODO avoid copies and memory allocation here
-    // TODO check whether output file already exists
-    base_path.append("_divien/");
-    std::error_code fs_ec;
-    bool was_created = fs::create_directory(base_path, fs_ec);
-    if (fs_ec) {
-        printf(DIVIEN ": Error creating temporary directory '%s': %s\n",
-               base_path.c_str(), fs_ec.message().c_str());
-        return -1;
-    }
-    if (!was_created) {
-        printf(DIVIEN ": Warning: using existing temporary directory '%s'\n",
-               base_path.c_str());
-    } else {
-        printf("Using temporary directory: '%s'\n", base_path.c_str());
-    }
-
-    printf("Writing encoded output to '%s'\n", out_filename);
-
-    EncodeLoopState state(num_workers, chunk_frame_size, n_threads);
-
-    auto start = now();
-
-    // so I think for thread affinity to work we will have to spawn different
-    // processes instead of threads. And somehow share memory between them.
-    std::vector<std::thread> thread_vector{};
-    thread_vector.reserve(state.num_workers);
-
-    // spawn worker threads
-    for (unsigned int i = 0; i < state.num_workers; i++) {
-        thread_vector.emplace_back(&worker_thread, base_path, prefix, i,
-                                   std::ref(d_ctx), std::ref(state), e_opts);
-    }
-
-    printf("frame= 0\n");
-
-    auto compute_fps = [](uint32_t n_frames, int64_t time_ms) -> double {
-        if (time_ms <= 0) [[unlikely]] {
-            return INFINITY;
-        } else [[likely]] {
-            return static_cast<double>(1000 * n_frames) /
-                   static_cast<double>(time_ms);
-        }
-    };
-
-    // TODO minimize size of these buffers
-    // TODO I wonder if it's more efficient to join these buffers
-    // into one. And use each half.
-    std::array<char, 32> avg_fps_fmt;
-
-    while (true) {
-        // acquire lock on mutex I guess?
-        // TODO: see if we can release this lock earlier.
-        std::unique_lock<std::mutex> lk(state.cv_m);
-
-        state.cv.wait_for(lk, std::chrono::seconds(1));
-
-        auto n_frames = state.nb_frames_done.load();
-
-        auto local_now = now();
-        auto total_elapsed_ms = dist_ms(start, local_now);
-
-        // So this part of the code can actually run multiple times.
-        // For each thread that signals completion.
-        // Well this does work for avoiding extra waiting unnecessarily.
-        // TODO simplify/optimize this code if possible
-
-        // average fps from start of encoding process
-        // TODO can we convert to faster loop with like boolean flag + function
-        // pointer or something? It probably won't actually end up being faster
-        // due to overhead tho.
-        auto avg_fps = compute_fps(n_frames, total_elapsed_ms);
-        // using 9.5 to align with rounding behavior of printf
-        (void)snprintf(avg_fps_fmt.data(), avg_fps_fmt.size(),
-                       avg_fps < 9.5 ? "%.1f" : "%0.f", avg_fps);
-
-        // print progress
-        // TODO I guess this should detect if we are outputting to a
-        // terminal/pipe and don't print ERASE_LINE_ASCII if not a tty.
-        printf(ERASE_LINE_ANSI "frame= %d  [%s fps]\n", n_frames,
-               avg_fps_fmt.data());
-
-        if (state.all_workers_finished()) {
-            break;
-        }
-    }
-
-    // In theory all the threads have already exited here
-    // but we need to call .join() anyways.
-    for (auto& t : thread_vector) {
-        t.join();
-    }
-
-    // there is no active lock on the mutex since all threads
-    // terminated, so global_chunk_id can be safely accessed.
-    // raw_concat_files(out_filename, global_chunk_id, true);
-    // TODO why does deleting files fail sometimes?
-    // TODO error handling
-    raw_concat_files(base_path, prefix, out_filename, state.global_chunk_id,
-                     false);
-    return 0;
-}
 
 // I guess the next step is to send each chunk in a loop.
 

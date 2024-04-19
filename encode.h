@@ -5,8 +5,14 @@
 #include <atomic>
 #include <condition_variable>
 #include <mutex>
+#include <span>
+
+#include "decode.h"
+#include "progress.h"
 
 #include "util.h"
+
+#define ERASE_LINE_ANSI "\x1B[1A\x1B[2K" // NOLINT
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -125,3 +131,61 @@ struct FrameAccurateWorkItem {
 };
 
 void encode_frame_range(FrameAccurateWorkItem& data, const char* ofname);
+
+// TODO: make output filename configurable
+// the passed folder_name should include a slash
+inline auto chunk_fname(std::string_view folder_name, std::string_view prefix,
+                        unsigned int chunk_idx) {
+    std::array<char, 512> buf;
+    (void)snprintf(buf.data(), buf.size(), "%.*s%.*s_chunk_%u.mp4",
+                   SV(folder_name), SV(prefix), chunk_idx);
+    return buf;
+}
+
+AlwaysInline int encode_chunk(std::string_view base_path,
+                              std::string_view prefix, unsigned int chunk_idx,
+                              std::span<AVFrame*> framebuf,
+                              EncodeLoopState& state, unsigned int n_threads,
+                              EncoderOpts e_opts, FrameRange frange) {
+    auto buf = chunk_fname(base_path, prefix, chunk_idx);
+    // printf("framebuf size: %zu\n", framebuf.size());
+    dump_chunk(frange);
+    return encode_frames(buf.data(), framebuf, state, n_threads, e_opts);
+}
+
+// assume same naming convention
+// this is direct concatenation, nothing extra done to files.
+// hardcoded. TODO remove.
+// perhaps we could special case this for 1 input file.
+// TODO error handling
+void raw_concat_files(std::string_view base_path, std::string_view prefix,
+                      const char* out_filename, unsigned int num_files,
+                      bool delete_after = false);
+
+// TODO perhaps for tests we can try with lossless
+// encoding and compare video results.
+// perhaps the tests could use python scripts to call
+// the binary or something.
+
+// Maybe long term we could provide a C or C++ library.
+// (probaby C).
+// TODO move all the TODOs into a separate doc/file or something.
+
+// decodes everything
+// TODO need to make the output of this compatible with libav
+// logging stuff. Maybe I can do that with a callback
+// so that I can really handle it properly.
+// This relies on global state. Do not call this function
+// more than once.
+// There's some kind of stalling going on here.
+// TODO make option to test standalone encoder.
+// There's only supposed to be 487 frames on 2_3.
+
+// This function will create a base path.
+// params is for encoder options
+
+[[nodiscard]] int
+chunked_encode_loop(EncoderOpts e_opts, const char* in_filename,
+                    const char* out_filename, DecodeContext& d_ctx,
+                    unsigned int num_workers, unsigned int chunk_frame_size,
+                    unsigned int n_threads);

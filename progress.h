@@ -18,5 +18,5 @@ struct FrameRange {
 inline void dump_chunk(FrameRange frange) {
     auto lower = frange.low;
     auto upper = frange.high;
-    printf("finished chunk: frame range %d-%d\n", lower, upper);
+    // printf("finished chunk: frame range %d-%d\n", lower, upper);
 }

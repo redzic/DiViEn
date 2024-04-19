@@ -2,6 +2,7 @@
 
 #include "util.h"
 #include <cstdint>
+#include <cstdio>
 #include <span>
 #include <vector>
 
