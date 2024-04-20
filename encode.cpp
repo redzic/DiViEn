@@ -293,23 +293,20 @@ void encode_frame_range(FrameAccurateWorkItem& data, const char* ofname) {
 
 // TODO: make output filename configurable
 // the passed folder_name should include a slash
-AlwaysInline auto chunk_fname(std::string_view folder_name,
-                              std::string_view prefix, unsigned int chunk_idx) {
-    // TODO handle very long file names with VLA
-    std::array<char, 512> buf;
-    (void)snprintf(buf.data(), buf.size(), "%.*s%.*s_chunk_%u.mp4",
+// folder_name and prefix should be string_view.
+#define chunk_fname(buf_var, folder_name, prefix, chunk_idx)                   \
+                                                                               \
+    char buf_var[(folder_name).size() + (prefix).size() + 64];                 \
+    (void)snprintf((char*)(buf_var), sizeof(buf_var), SVF SVF "_chunk_%u.mp4", \
                    SV(folder_name), SV(prefix), chunk_idx);
-    return buf;
-}
 
 AlwaysInline int encode_chunk(std::string_view base_path,
                               std::string_view prefix, unsigned int chunk_idx,
                               std::span<AVFrame*> framebuf,
                               EncodeLoopState& state, unsigned int n_threads,
                               EncoderOpts e_opts, ChunkData frange) {
-    auto buf = chunk_fname(base_path, prefix, chunk_idx);
-    // printf("framebuf size: %zu\n", framebuf.size());
-    int ret = encode_frames(buf.data(), framebuf, state, n_threads, e_opts);
+    chunk_fname(buf, base_path, prefix, chunk_idx);
+    int ret = encode_frames((char*)buf, framebuf, state, n_threads, e_opts);
     dump_chunk(state.resume_m, state.resume_data, state.p_fname, frange);
     return ret;
 }
@@ -429,13 +426,13 @@ void raw_concat_files(std::string_view base_path, std::string_view prefix,
     std::ofstream dst(out_filename, std::ios::binary);
 
     for (unsigned int i = 0; i < num_files; i++) {
-        auto buf = chunk_fname(base_path, prefix, i);
-        std::ifstream src(buf.data(), std::ios::binary);
+        chunk_fname(buf, base_path, prefix, i);
+        std::ifstream src((char*)buf, std::ios::binary);
         dst << src.rdbuf();
         src.close();
         // delete file after done
         if (delete_after) {
-            DvAssert(std::remove(buf.data()) == 0);
+            DvAssert(std::remove(buf) == 0);
         }
     }
 

@@ -3,6 +3,7 @@
 #define AlwaysInline __attribute__((always_inline)) inline
 
 #define SV(sv_var) (int)(sv_var).size(), (sv_var).data()
+#define SVF "%.*s"
 
 #define DELETE_DEFAULT_CTORS(MacroArgStructName)                               \
     MacroArgStructName() = delete;                                             \

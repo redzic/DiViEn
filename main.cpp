@@ -269,19 +269,20 @@ int try_parse_uint(unsigned int& result, const char* sp,
     if (ec == std::errc()) {
         if (ptr != (str.data() + str.size())) {
             (void)fprintf(stderr,
-                          DIVIEN ": Error: Argument for %.*s: argument "
+                          DIVIEN ": Error: Argument for " SVF ": argument "
                                  "contains non-digit characters\n",
                           SV(argname));
             return -1;
         }
         return 0;
     } else if (ec == std::errc::invalid_argument) {
-        (void)fprintf(stderr,
-                      DIVIEN ": Error: Argument for %.*s: invalid argument\n",
-                      SV(argname));
+        (void)fprintf(
+            stderr, DIVIEN ": Error: Argument for " SVF ": invalid argument\n",
+            SV(argname));
     } else if (ec == std::errc::result_out_of_range) {
         (void)fprintf(stderr,
-                      DIVIEN ": Error: Argument for %.*s: value out of range\n",
+                      DIVIEN ": Error: Argument for " SVF
+                             ": value out of range\n",
                       SV(argname));
     }
     return -1;
@@ -452,7 +453,7 @@ int main(int argc, const char* argv[]) {
                            arg_sv == "-codec:v") {
                     if (encoder_name_s != nullptr) [[unlikely]] {
                         printf(DIVIEN_ERR "Encoder already specified, cannot "
-                                          "provide %.*s\n",
+                                          "provide " SVF "\n",
                                SV(arg_sv));
                         return -1;
                     }
@@ -532,7 +533,7 @@ int main(int argc, const char* argv[]) {
                 }
                 continue;
             print_err:
-                printf(DIVIEN_ERR "No argument specified for %.*s.\n",
+                printf(DIVIEN_ERR "No argument specified for " SVF ".\n",
                        SV(arg_sv));
                 return -1;
             }
@@ -610,8 +611,8 @@ int main(int argc, const char* argv[]) {
                 // more specific error messages on AVError. Need to deduplicate
                 // a bunch of code.
                 auto m = err.errmsg();
-                printf("Failed to open input file '%s': %.*s\n", input_path_s,
-                       SV(m));
+                printf("Failed to open input file '%s': " SVF "\n",
+                       input_path_s, SV(m));
                 return -1;
             }
 
