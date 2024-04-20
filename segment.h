@@ -92,7 +92,7 @@ fix_broken_segments(unsigned int num_segments,
                     std::vector<uint32_t>& packet_offsets,
                     std::span<Timestamp> timestamps);
 
-// 250 frames per segment, 1024 segments
+// estimates based on assuming 250 frames per segment, 1024 segments
 // more accurate estimate is maybe 120-250. Will depend on video of
 // course.
 

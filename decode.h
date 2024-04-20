@@ -77,8 +77,6 @@ struct DecoderCreationError {
 
 // maybe add ctrl+C interrupt that just stops and flushes all packets so far?
 
-// constexpr size_t FRAMEBUF_SIZE = CHUNK_FRAME_SIZE * NUM_WORKERS;
-// using FrameBuf = std::array<AVFrame*, FRAMEBUF_SIZE>;
 using FrameBuf = std::vector<AVFrame*>;
 
 // yeah so even if you override the destructor, the other destructors
@@ -105,7 +103,7 @@ struct DecodeContext {
 
     AVCodecContext* decoder{nullptr};
 
-    FrameBuf framebuf{};
+    FrameBuf framebuf;
 
     // -1 if not initialized; else the index of the video stream
     int video_index = -1;

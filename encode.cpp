@@ -7,6 +7,8 @@
 #include "resource.h"
 #include "timing.h"
 #include "util.h"
+#include <cstring>
+#include <libavutil/frame.h>
 
 namespace fs = std::filesystem;
 
@@ -93,23 +95,18 @@ void EncoderContext::initialize_codec(AVFrame* frame, unsigned int n_threads,
 int encode_frame(AVCodecContext* enc_ctx, AVFrame* frame, AVPacket* pkt,
                  FILE* ostream, std::atomic<uint32_t>& frame_count) {
     // frame can be null, which is considered a flush frame
-    DvAssert(enc_ctx != nullptr);
-    int ret = avcodec_send_frame(enc_ctx, frame);
-
-    // I think it has to do with some of the metadata not being the same...
-    // compared to the previous frames. Does that have to do with segmenting?
-    // if the issue doesn't happen on chunks that are fixed up, then
-    // perhaps there's a pattern there...
-    // But then why does it happen only on like the 3RD frame and only on
-    // SOME encoders?
-    if (frame != nullptr) {
+    DvAssert(enc_ctx);
+    if (frame) {
         DvAssert(avframe_has_buffer(frame));
+        DvAssert(frame->pict_type == AV_PICTURE_TYPE_NONE);
     }
+
+    int ret = avcodec_send_frame(enc_ctx, frame);
 
     if (ret < 0) {
         // TODO deduplicate, make macro or function to do this
         auto errmsg = av_strerr(ret);
-        if (frame == nullptr) {
+        if (!frame) {
             printf("error sending flush frame to encoder: %s\n", errmsg.data());
         } else {
             printf("error sending frame to encoder: %s\n", errmsg.data());
@@ -135,20 +132,8 @@ int encode_frame(AVCodecContext* enc_ctx, AVFrame* frame, AVPacket* pkt,
 
         // can write the compressed packet to the bitstream now
 
-        // TODO make this non-blocking
+        // TODO make this non-blocking with ASIO
         DvAssert(fwrite(pkt->data, 1, pkt->size, ostream) == (size_t)pkt->size);
-
-        // WILL NEED THIS FUNCTION: av_frame_make_writable
-        //
-        // make_writable_frame actually COPIES the data over (potentially),
-        // which is not ideal. if it's going to make a copy, the actual contents
-        // don't need to be initialized. That's a super expensive thing to do
-        // anyway.
-        // I really don't get how that function works anyway.
-        // It seems to actually delete the original anyway. So how does that
-        // preserve references?
-        // Unless there's a difference between av_frame_unref and
-        // av_frame_free.
 
         av_packet_unref(pkt);
     }
@@ -183,6 +168,26 @@ int encode_frames(const char* file_name, std::span<AVFrame*> framebuf,
     return 0;
 }
 
+static void get_frame_defaults(AVFrame* frame) {
+    memset(frame, 0, sizeof(*frame));
+
+    frame->pts = frame->pkt_dts = AV_NOPTS_VALUE;
+    frame->best_effort_timestamp = AV_NOPTS_VALUE;
+    frame->duration = 0;
+    frame->time_base = (AVRational){0, 1};
+    frame->sample_aspect_ratio = (AVRational){0, 1};
+    frame->format = -1; /* unknown */
+    frame->extended_data = frame->data;
+    frame->color_primaries = AVCOL_PRI_UNSPECIFIED;
+    frame->color_trc = AVCOL_TRC_UNSPECIFIED;
+    frame->colorspace = AVCOL_SPC_UNSPECIFIED;
+    frame->color_range = AVCOL_RANGE_UNSPECIFIED;
+    frame->chroma_location = AVCHROMA_LOC_UNSPECIFIED;
+    frame->flags = 0;
+}
+
+// Somewhere here we leak memory
+// TODO add asserts for decoder handling
 void encode_frame_range(FrameAccurateWorkItem& data, const char* ofname) {
     // we only skip frames on the first chunk, otherwise it wouldn't
     // make any sense. All chunks have frames we need to decode.
@@ -197,6 +202,11 @@ void encode_frame_range(FrameAccurateWorkItem& data, const char* ofname) {
 
     printf("frame= 0\n");
 
+    AVFrame frame;
+    get_frame_defaults(&frame);
+
+    int64_t fixed_pts = 0;
+
     for (uint32_t idx = data.low_idx; idx <= data.high_idx; idx++) {
 
         std::array<char, 128> input_fname;
@@ -207,88 +217,83 @@ void encode_frame_range(FrameAccurateWorkItem& data, const char* ofname) {
                input_fname.data());
 
         auto dres = DecodeContext::open(input_fname.data(), 0);
+        auto& dc = std::get<DecodeContext>(dres);
 
         // perhaps we could initialize all these decoders at the same time...
         // to save time.
         // TODO reuse underlying frame buffer
 
-        std::visit(
-            [&, ofptr = ofptr.get()](auto&& dc) {
-                using T = std::decay_t<decltype(dc)>;
+        // TODO split loop if possible
+        if (idx == data.low_idx) {
+            // means we first need to decode nskip frames
+            // initially, frames are not writable. Because they
+            // have
+            // not been properly allocated yet, their actual
+            // buffers
+            // I mean. The decoder allocates those buffers.
+            for (uint32_t nf = 0; nf < data.nskip; nf++) {
 
-                if constexpr (std::is_same_v<T, DecodeContext>) {
-                    // TODO split loop if possible
-                    if (idx == data.low_idx) {
-                        // means we first need to decode nskip frames
-                        // initially, frames are not writable. Because they
-                        // have
-                        // not been properly allocated yet, their actual
-                        // buffers
-                        // I mean. The decoder allocates those buffers.
-                        for (uint32_t nf = 0; nf < data.nskip; nf++) {
-                            AVFrame* frame = av_frame_alloc();
-
-                            // first iteration of loop
-                            DvAssert(decode_next(dc, frame) == 0);
-                            if (nf == 0) {
-                                // TODO use proper amount of threads
-                                encoder.initialize_codec(frame, 1,
-                                                         DEFAULT_ENCODER);
-                                enc_was_init = true;
-                            }
-                            av_frame_unref(frame);
-                        }
-                    } else {
-                        DvAssert(enc_was_init);
-                    }
-
-                    // TODO allow configurable frame size when constructing
-                    // decoder, to avoid wasting memory
-                    while (nleft > 0) {
-                        printf("%d frames left\n\n", nleft);
-
-                        AVFrame* frame = av_frame_alloc();
-
-                        int ret = 0;
-                        if ((ret = decode_next(dc, frame)) != 0) {
-                            printf("Decoder unexpectedly returned error: %s\n",
-                                   av_strerr(ret).data());
-                            break;
-                        }
-
-                        if (!enc_was_init) [[unlikely]] {
-                            // TODO use proper amoutn of threads
-                            encoder.initialize_codec(frame, 1, DEFAULT_ENCODER);
-                            enc_was_init = true;
-                        }
-
-                        DvAssert(frame != nullptr);
-                        DvAssert(avframe_has_buffer(frame));
-                        // so the issue is not that the frame doesn't have a
-                        // buffer, hmm...
-                        // DvAssert(av_frame_make_writable(frame) == 0);
-                        printf("Sending frame... Is writable? %d\n",
-                               av_frame_is_writable(frame));
-                        DvAssert(encode_frame(encoder.avcc, frame, encoder.pkt,
-                                              ofptr, nframes_done) == 0);
-                        printf("frame= %u\n", nframes_done.load());
-
-                        av_frame_unref(frame);
-
-                        nleft--;
-                    }
-                } else {
-                    printf("Decoder failed to open for input file '%s'\n",
-                           input_fname.data());
+                // This can fail if you run 2 clients in the same directory.
+                // TODO prevent that.
+                DvAssert(decode_next(dc, &frame) == 0);
+                if (nf == 0) {
+                    // TODO use proper amount of threads
+                    encoder.initialize_codec(&frame, 8, AOMENC);
+                    enc_was_init = true;
                 }
-            },
-            dres);
-    }
+            }
+        } else {
+            DvAssert(enc_was_init);
+        }
 
-    DvAssert(ofptr.get() != nullptr);
+        // TODO allow configurable frame size when constructing
+        // decoder, to avoid wasting memory
+        while (nleft > 0) {
+            printf("%d frames left\n\n", nleft);
+
+            int ret = 0;
+            // if (avframe_has_buffer(&frame))
+            //     DvAssert(av_frame_make_writable(&frame) == 0);
+
+            if ((ret = decode_next(dc, &frame)) != 0) {
+                // DvAssert();
+                break;
+            }
+
+            if (!enc_was_init) {
+                // can happen if nskip is 0
+                DvAssert(data.nskip == 0);
+                DvAssert(idx == data.low_idx);
+                encoder.initialize_codec(&frame, 8, AOMENC);
+                enc_was_init = true;
+            }
+
+            // TODO find out of intel TBB can override posix thread creation
+            // function/std::thread
+
+            DvAssert(avframe_has_buffer(&frame));
+            DvAssert(encoder.pkt);
+
+            // fixing pts is required, otherwise encoder can get confused
+            // when it sees the next packet. And weird errors will happen.
+            // TODO debug assert that original pts are in order.
+            frame.pts = fixed_pts++;
+            frame.pict_type = AV_PICTURE_TYPE_NONE;
+            DvAssert(encode_frame(encoder.avcc, &frame, encoder.pkt,
+                                  ofptr.get(), nframes_done) == 0);
+            printf("frame= %u\n", nframes_done.load());
+
+            nleft--;
+        }
+    }
+    av_frame_unref(&frame);
+
+    DvAssert(ofptr != nullptr);
     printf("Sending flush packet...\n");
     // why does this return an error?
     encode_frame(encoder.avcc, nullptr, encoder.pkt, ofptr.get(), nframes_done);
+    printf("Chunk finished [%d frames], output = '%s'\n", nframes_done.load(),
+           ofname);
 }
 
 // TODO: make output filename configurable

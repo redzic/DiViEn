@@ -357,7 +357,7 @@ FinalWorklist server_prepare_work(const char* source_file,
     // ideally we should use another type for this because these are actually
     // frame indexes not something else.
     std::vector<FixedSegment> scene_splits{};
-    constexpr uint32_t SPLIT_SIZE = 250;
+    constexpr uint32_t SPLIT_SIZE = 30;
     for (uint32_t i = 0; i < sg.packet_offsets.back(); i += SPLIT_SIZE) {
         scene_splits.emplace_back(
             i, std::min(i + SPLIT_SIZE - 1, sg.packet_offsets.back() - 1));

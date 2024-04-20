@@ -92,7 +92,17 @@ struct EncoderOpts {
           n_param_pairs(n_param_pairs_) {}
 };
 
-constexpr EncoderOpts DEFAULT_ENCODER = EncoderOpts("libx264", nullptr, 0);
+static constexpr EncoderOpts DEFAULT_ENCODER =
+    EncoderOpts("libx264", nullptr, 0);
+
+static constexpr const char* AOM_PARAMS[] = {"-cpu-used", "6", "-crf", "30"};
+static constexpr const char* X264_PARAMS[] = {"-crf", "30", "-preset",
+                                              "ultrafast"};
+static constexpr EncoderOpts AOMENC =
+    EncoderOpts("libaom-av1", (const char**)AOM_PARAMS, 2);
+// static constexpr EncoderOpts AOMENC =
+//     EncoderOpts("libx264", (const char**)X264_PARAMS, 2);
+// static constexpr EncoderOpts AOMENC = DEFAULT_ENCODER;
 
 struct EncoderContext {
     AVCodecContext* avcc{nullptr};
