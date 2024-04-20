@@ -24,7 +24,7 @@ To compile this project, run:
 ```
 git clone https://github.com/redzic/DiViEn && cd DiViEn
 mkdir build && cd build
-cmake ..
+cmake .. -DCMAKE_BUILD_TYPE=Release
 cmake --build .
 ```
 
@@ -57,7 +57,7 @@ Note that the `-threads` (threads per worker) option does not always correlate w
 The output file may not be fully compatible with some video players at the moment due to
 a lack of proper timestamps being set. This should be fixed in the future.
 
-Distributed encoding currently is implemented in a basic form, but contains bugs. These should be fixed in the future.
+Distributed encoding currently is implemented in a basic form. It is in early stages, so if you find any issues with it please report them.
 
 ### Current Limitations
 
