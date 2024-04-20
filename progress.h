@@ -66,14 +66,6 @@ inline chunk_hmap parse_chunks(const char* pfile) {
 // frame indexes are inclusive.
 inline void dump_chunk(std::mutex& f_mutex, chunk_hmap& finished_chunks,
                        const char* pfile, ChunkData cd) {
-    // mutex for progress file logging + unordered_map access
-    // yeah this mutex should really be in the original struct instead of
-    // here...
-    // since this is going to block the entire function which is not good,
-    // and also not correct
-    // TODO FIXME This starts from 0 every time... I think that's the real
-    // issue...
-
     std::lock_guard<std::mutex> lock(f_mutex);
     // ---- we have lock on mutex now
 
