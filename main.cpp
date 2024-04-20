@@ -631,8 +631,7 @@ int main(int argc, const char* argv[]) {
             DvAssert(dc.demuxer != nullptr);
             av_dump_format(dc.demuxer, dc.video_index, input_path_s, 0);
 
-            // av_log_set_level(AV_LOG_WARNING);
-            av_log_set_level(AV_LOG_INFO);
+            av_log_set_level(AV_LOG_WARNING);
 
             EncoderOpts e_opts(encoder_name_s, ff_enc_first_param,
                                ff_enc_n_param_pairs);
