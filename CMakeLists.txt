@@ -19,9 +19,11 @@ endif()
 
 
 set(CMAKE_CXX_STANDARD 23)
-# set(CMAKE_BUILD_TYPE Release)
-# set(CMAKE_BUILD_TYPE Debug)
-# set(CMAKE_BUILD_TYPE RelWithDebInfo)
+
+# set release mode if no mode was specified
+if (CMAKE_BUILD_TYPE STREQUAL "")
+  set(CMAKE_BUILD_TYPE Release)
+endif()
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS TRUE)
 

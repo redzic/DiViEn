@@ -55,6 +55,10 @@ extern "C" {
 
 #endif
 
+AlwaysInline void w_out(std::string_view sv) {
+    write(STDOUT_FILENO, sv.data(), sv.size());
+}
+
 AlwaysInline void w_err(std::string_view sv) {
     write(STDERR_FILENO, sv.data(), sv.size());
 }
@@ -329,6 +333,8 @@ void print_help_encoder(const AVClass* av_class) {
 
 // TODO: move argparse code to separate file
 
+#define DIVIEN_VERSION "0.0.0 ALPHA (Unreleased)"
+
 int main(int argc, const char* argv[]) {
 
     // TODO could implement checking on our side with allowed list of values
@@ -377,6 +383,10 @@ int main(int argc, const char* argv[]) {
     // Honestly yeah let's just use async.
     auto mode = std::string_view(argv[1]);
     try {
+        if (mode == "--version" || mode == "-version") {
+            w_out(DIVIEN " version " DIVIEN_VERSION "\n");
+            return 0;
+        }
         if (mode == "server") {
             if (argc < 3) {
                 w_err(DIVIEN_ERR
@@ -621,7 +631,8 @@ int main(int argc, const char* argv[]) {
             DvAssert(dc.demuxer != nullptr);
             av_dump_format(dc.demuxer, dc.video_index, input_path_s, 0);
 
-            av_log_set_level(AV_LOG_WARNING);
+            // av_log_set_level(AV_LOG_WARNING);
+            av_log_set_level(AV_LOG_INFO);
 
             EncoderOpts e_opts(encoder_name_s, ff_enc_first_param,
                                ff_enc_n_param_pairs);

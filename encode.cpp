@@ -66,7 +66,8 @@ void EncoderContext::initialize_codec(AVFrame* frame, unsigned int n_threads,
         DvAssert(strlen(key) >= 1);
         DvAssert(strlen(value) >= 1);
         DvAssert(key[0] == '-');
-        int ret = av_opt_set(avcc->priv_data, key + 1, value, 0);
+        int ret = av_opt_set(avcc->priv_data, &key[1], value, 0);
+        DvAssert(ret == 0);
         const char* err = nullptr;
         // TODO: come up with mechanism to integrate the progress bar
         // printing, so the two don't conflict.
@@ -80,8 +81,8 @@ void EncoderContext::initialize_codec(AVFrame* frame, unsigned int n_threads,
             err = "unspecified error";
         }
         if (ret) {
-            fprintf(stderr, "\n\nWARNING: Failed to set %s=%s: %s\n\n", key,
-                    value, err);
+            (void)fprintf(stderr, "\n\nWARNING: Failed to set %s=%s: %s\n\n",
+                          key, value, err);
         }
     }
 
@@ -155,9 +156,11 @@ int encode_frames(const char* file_name, std::span<AVFrame*> framebuf,
     // TODO use unique_ptr as wrapper resource manager
     make_file(file, file_name, "wb");
 
+    int64_t pts = 0;
     for (auto* frame : framebuf) {
         // required
         frame->pict_type = AV_PICTURE_TYPE_NONE;
+        frame->pts = pts++;
         encode_frame(encoder.avcc, frame, encoder.pkt, file.get(),
                      state.nb_frames_done);
     }
@@ -322,12 +325,12 @@ int worker_thread(std::string_view base_path, std::string_view prefix,
                   unsigned int worker_id, DecodeContext& decoder,
                   EncodeLoopState& state, EncoderOpts e_opts) {
     for (;;) {
-        for (size_t i = 0; i < state.chunk_frame_size; i++) {
-            size_t idx = (size_t)worker_id * state.chunk_frame_size + i;
-            if (avframe_has_buffer(decoder.framebuf[idx])) {
-                DvAssert(av_frame_make_writable(decoder.framebuf[idx]) == 0);
-            }
-        }
+        // for (size_t i = 0; i < state.chunk_frame_size; i++) {
+        //     size_t idx = (size_t)worker_id * state.chunk_frame_size + i;
+        // if (avframe_has_buffer(decoder.framebuf[idx])) {
+        //     DvAssert(av_frame_make_writable(decoder.framebuf[idx]) == 0);
+        // }
+        // }
 
         // should only access decoder once lock has been acquired
         // uh should we replace with like unique_lock or lock_guard
