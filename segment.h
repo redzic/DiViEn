@@ -179,13 +179,13 @@ inline void iter_segfiles(F use_file, uint32_t nb_segments,
 // TODO: make standardized terminology
 // so it's more clear what stuff is referring to.
 struct SegmentResult {
-    std::vector<ConcatRange> concat_ranges{};
+    std::vector<ConcatRange> concat_ranges;
     // packet offsets for original, unconcatenated segments
     // so packet_offsets[i] gives ith packet offset for ORIGINAL segment.
     // The last element of this vector is equal to the total number of packets.
     // Therefore, the size of this vector is equal to the number of chunks plus
     // one.
-    std::vector<uint32_t> packet_offsets{};
+    std::vector<uint32_t> packet_offsets;
 };
 
 // TODO clean up this API. It's a mess currently.
