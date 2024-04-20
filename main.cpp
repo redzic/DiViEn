@@ -325,6 +325,9 @@ void print_help_encoder(const AVClass* av_class) {
 // TODO: allow more flexible -c:v placement. Just check
 // if an option is a divien option instead and stop parsing
 // encoder args if so.
+
+// TODO: move argparse code to separate file
+
 int main(int argc, const char* argv[]) {
 
     // TODO could implement checking on our side with allowed list of values
@@ -551,10 +554,10 @@ int main(int argc, const char* argv[]) {
 
             printf("Using output file '%s'\n", output_path_s);
 
-#define PARSE_OPTIONAL_ARG(data_var, string_var, arg_name_macro)               \
+#define PARSE_OPTIONAL_ARG(data_var, string_var, arg_name)                     \
     {                                                                          \
         if ((string_var) != nullptr) {                                         \
-            if (try_parse_uint(data_var, string_var, arg_name_macro) < 0)      \
+            if (try_parse_uint(data_var, string_var, arg_name) < 0)            \
                 [[unlikely]] {                                                 \
                 return -1;                                                     \
             }                                                                  \

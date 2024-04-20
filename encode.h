@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <cstdio>
 #include <mutex>
 #include <span>
 
@@ -11,8 +12,6 @@
 #include "progress.h"
 
 #include "util.h"
-
-#define ERASE_LINE_ANSI "\x1B[1A\x1B[2K" // NOLINT
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -50,24 +49,33 @@ struct EncodeLoopState {
 
     std::atomic<uint32_t> nb_frames_done;
     std::atomic<uint32_t> nb_threads_done;
+    std::atomic<uint32_t> nb_frames_skipped;
 
-    // These 3 should never be modified after initialization.
+    chunk_hmap& resume_data;
+    std::mutex resume_m;
+
+    // ALL FIELDS BELOW ARE CONSTANT FIELDS
     unsigned int num_workers;
     unsigned int chunk_frame_size;
     unsigned int n_threads; // number of threads per worker
+
+    const char* p_fname; // progress file path
+    // must be initialized right after
 
     [[nodiscard]] AlwaysInline bool all_workers_finished() const noexcept {
         return this->nb_threads_done == this->num_workers;
     }
 
     DELETE_DEFAULT_CTORS(EncodeLoopState)
-    ~EncodeLoopState() = default;
 
-    explicit EncodeLoopState(unsigned int num_workers_,
-                             unsigned int chunk_frame_size_,
-                             unsigned int n_threads_)
-        : num_workers(num_workers_), chunk_frame_size(chunk_frame_size_),
-          n_threads(n_threads_) {}
+    EncodeLoopState(const char* filename, unsigned int num_workers_,
+                    unsigned int chunk_frame_size_, unsigned int n_threads_,
+                    chunk_hmap& resume_data_)
+        : resume_data(resume_data_), num_workers(num_workers_),
+          chunk_frame_size(chunk_frame_size_), n_threads(n_threads_),
+          p_fname(filename) {}
+
+    ~EncodeLoopState() = default;
 };
 
 // This is a REFERENCE to other existing data.
@@ -131,27 +139,6 @@ struct FrameAccurateWorkItem {
 };
 
 void encode_frame_range(FrameAccurateWorkItem& data, const char* ofname);
-
-// TODO: make output filename configurable
-// the passed folder_name should include a slash
-inline auto chunk_fname(std::string_view folder_name, std::string_view prefix,
-                        unsigned int chunk_idx) {
-    std::array<char, 512> buf;
-    (void)snprintf(buf.data(), buf.size(), "%.*s%.*s_chunk_%u.mp4",
-                   SV(folder_name), SV(prefix), chunk_idx);
-    return buf;
-}
-
-AlwaysInline int encode_chunk(std::string_view base_path,
-                              std::string_view prefix, unsigned int chunk_idx,
-                              std::span<AVFrame*> framebuf,
-                              EncodeLoopState& state, unsigned int n_threads,
-                              EncoderOpts e_opts, FrameRange frange) {
-    auto buf = chunk_fname(base_path, prefix, chunk_idx);
-    // printf("framebuf size: %zu\n", framebuf.size());
-    dump_chunk(frange);
-    return encode_frames(buf.data(), framebuf, state, n_threads, e_opts);
-}
 
 // assume same naming convention
 // this is direct concatenation, nothing extra done to files.

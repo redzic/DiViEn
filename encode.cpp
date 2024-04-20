@@ -3,8 +3,10 @@
 #include "common.h"
 #include "decode.h"
 #include "ffutil.h"
+#include "progress.h"
 #include "resource.h"
 #include "timing.h"
+#include "util.h"
 
 namespace fs = std::filesystem;
 
@@ -12,6 +14,8 @@ namespace fs = std::filesystem;
 #include <fstream>
 #include <iostream>
 #include <mutex>
+
+#define ERASE_LINE_ANSI "\x1B[1A\x1B[2K"
 
 AVPixelFormat av_pix_fmt_supported_version(AVPixelFormat pix_fmt) {
     switch (pix_fmt) {
@@ -104,12 +108,12 @@ int encode_frame(AVCodecContext* enc_ctx, AVFrame* frame, AVPacket* pkt,
 
     if (ret < 0) {
         // TODO deduplicate, make macro or function to do this
+        auto errmsg = av_strerr(ret);
         if (frame == nullptr) {
-            printf("error sending flush frame to encoder: ");
+            printf("error sending flush frame to encoder: %s\n", errmsg.data());
         } else {
-            printf("error sending frame to encoder: ");
+            printf("error sending frame to encoder: %s\n", errmsg.data());
         }
-        printf("encoder error: %s\n", av_strerr(ret).data());
 
         return ret;
     }
@@ -131,6 +135,7 @@ int encode_frame(AVCodecContext* enc_ctx, AVFrame* frame, AVPacket* pkt,
 
         // can write the compressed packet to the bitstream now
 
+        // TODO make this non-blocking
         DvAssert(fwrite(pkt->data, 1, pkt->size, ostream) == (size_t)pkt->size);
 
         // WILL NEED THIS FUNCTION: av_frame_make_writable
@@ -286,12 +291,35 @@ void encode_frame_range(FrameAccurateWorkItem& data, const char* ofname) {
     encode_frame(encoder.avcc, nullptr, encoder.pkt, ofptr.get(), nframes_done);
 }
 
+// TODO: make output filename configurable
+// the passed folder_name should include a slash
+AlwaysInline auto chunk_fname(std::string_view folder_name,
+                              std::string_view prefix, unsigned int chunk_idx) {
+    // TODO handle very long file names with VLA
+    std::array<char, 512> buf;
+    (void)snprintf(buf.data(), buf.size(), "%.*s%.*s_chunk_%u.mp4",
+                   SV(folder_name), SV(prefix), chunk_idx);
+    return buf;
+}
+
+AlwaysInline int encode_chunk(std::string_view base_path,
+                              std::string_view prefix, unsigned int chunk_idx,
+                              std::span<AVFrame*> framebuf,
+                              EncodeLoopState& state, unsigned int n_threads,
+                              EncoderOpts e_opts, ChunkData frange) {
+    auto buf = chunk_fname(base_path, prefix, chunk_idx);
+    // printf("framebuf size: %zu\n", framebuf.size());
+    int ret = encode_frames(buf.data(), framebuf, state, n_threads, e_opts);
+    dump_chunk(state.resume_m, state.resume_data, state.p_fname, frange);
+    return ret;
+}
+
 // framebuf is start of frame buffer that worker can use
 // TODO pass n_threads and chunk size in with some shared state
 int worker_thread(std::string_view base_path, std::string_view prefix,
                   unsigned int worker_id, DecodeContext& decoder,
                   EncodeLoopState& state, EncoderOpts e_opts) {
-    while (true) {
+    for (;;) {
         for (size_t i = 0; i < state.chunk_frame_size; i++) {
             size_t idx = (size_t)worker_id * state.chunk_frame_size + i;
             if (avframe_has_buffer(decoder.framebuf[idx])) {
@@ -305,21 +333,60 @@ int worker_thread(std::string_view base_path, std::string_view prefix,
         // idk how save this is
         state.global_decoder_mutex.lock();
 
-        // decode CHUNK_FRAME_SIZE frames into frame buffer
-        int frames =
-            run_decoder(decoder, (size_t)worker_id * state.chunk_frame_size,
-                        state.chunk_frame_size);
+        auto chunk_idx = state.global_chunk_id++;
+        int frames = 0;
 
-        // error decoding
-        if (frames <= 0) {
-            state.nb_threads_done++;
-            state.cv.notify_one();
-            state.global_decoder_mutex.unlock();
-            return frames;
+        // get chunk
+        // TODO: fix locking of mutex that can happen if
+        // resume file contains invalid data.
+        for (;;) {
+            auto should_skip = state.resume_data.contains(chunk_idx);
+            // decode CHUNK_FRAME_SIZE frames into frame buffer
+            // decode into same frame to thrash memory less
+            int frames2 = 0;
+            if (should_skip) {
+                // TODO reuse loop counter variable for frames2
+                for (unsigned int n = state.chunk_frame_size; n; n--) {
+                    frames = run_decoder(
+                        decoder, (size_t)worker_id * state.chunk_frame_size, 1);
+                    if (frames <= 0) {
+                        // TODO handle error by releasing mutex
+                        DvAssert(frames2 > 0);
+                        break;
+                    }
+                    frames2 += frames;
+                }
+                DbgDvAssert(frames2 == (state.resume_data[chunk_idx].high -
+                                        state.resume_data[chunk_idx].low + 1));
+                state.nb_frames_skipped += frames2;
+
+                chunk_idx = state.global_chunk_id++;
+                continue;
+            }
+
+            // I think something with chunk_idx incrementing is totally
+            // wrong...
+            frames =
+                run_decoder(decoder, (size_t)worker_id * state.chunk_frame_size,
+                            state.chunk_frame_size);
+            // eof or decoding error
+            if (frames <= 0) {
+                state.nb_threads_done++;
+                state.cv.notify_one();
+                state.global_decoder_mutex.unlock();
+                return frames;
+            }
+            break;
+
+            // end of loop
         }
 
+        DvAssert(frames != 0);
+
+        // we decoded our chunk. If that chunk should be skipped, then we skip
+        // it.
+
         // these accesses are behind mutex so we're all good
-        auto chunk_idx = state.global_chunk_id++;
         // increment for next chunk
 
         // can assume frames are available, so unlock the mutex so
@@ -327,10 +394,10 @@ int worker_thread(std::string_view base_path, std::string_view prefix,
         state.global_decoder_mutex.unlock();
 
         DvAssert(state.chunk_frame_size != 0);
-        FrameRange frange = {.low = chunk_idx * state.chunk_frame_size,
-                             .high = chunk_idx * state.chunk_frame_size +
-                                     state.chunk_frame_size - 1};
-
+        ChunkData frange = {.idx = chunk_idx,
+                            .low = chunk_idx * state.chunk_frame_size,
+                            .high = chunk_idx * state.chunk_frame_size +
+                                    frames - 1};
         // a little sketchy but in theory this should be fine
         // since framebuf is never modified
         int ret = encode_chunk(
@@ -375,6 +442,48 @@ void raw_concat_files(std::string_view base_path, std::string_view prefix,
     dst.close();
 }
 
+static double compute_fps(uint32_t n_frames, int64_t time_ms) {
+    if (time_ms <= 0) [[unlikely]] {
+        return INFINITY;
+    } else [[likely]] {
+        return static_cast<double>(1000 * n_frames) /
+               static_cast<double>(time_ms);
+    }
+};
+
+static void print_progress_internal(auto start, uint32_t n_done,
+                                    uint32_t n_skipped) {
+    std::array<char, 32> avg_fps_fmt;
+
+    auto local_now = now();
+    auto total_elapsed_ms = dist_ms(start, local_now);
+
+    // So this part of the code can actually run multiple times.
+    // For each thread that signals completion.
+    // Well this does work for avoiding extra waiting unnecessarily.
+    // TODO simplify/optimize this code if possible
+
+    // average fps from start of encoding process
+    // TODO can we convert to faster loop with like boolean flag + function
+    // pointer or something? It probably won't actually end up being faster
+    // due to overhead tho.
+    auto avg_fps = compute_fps(n_done, total_elapsed_ms);
+    // using 9.5 to align with rounding behavior of printf
+    (void)snprintf(avg_fps_fmt.data(), avg_fps_fmt.size(),
+                   avg_fps < 9.5 ? "%.1f" : "%0.f", avg_fps);
+
+    // print progress
+    // TODO I guess this should detect if we are outputting to a
+    // terminal/pipe and don't print ERASE_LINE_ANSI if not a tty.
+    if (n_skipped) {
+        printf(ERASE_LINE_ANSI "frame= %d  [%s fps]   (%d skipped)\n",
+               n_done + n_skipped, avg_fps_fmt.data(), n_skipped);
+    } else {
+        printf(ERASE_LINE_ANSI "frame= %d  [%s fps]\n", n_done,
+               avg_fps_fmt.data());
+    }
+}
+
 [[nodiscard]] int
 chunked_encode_loop(EncoderOpts e_opts, const char* in_filename,
                     const char* out_filename, DecodeContext& d_ctx,
@@ -397,21 +506,43 @@ chunked_encode_loop(EncoderOpts e_opts, const char* in_filename,
                base_path.c_str(), fs_ec.message().c_str());
         return -1;
     }
+    // TODO: add CLI option to abort when directory already exists. Or perhaps
+    // by default it aborts and add option to reuse/overwrite same directory.
+
+    // TODO remove copy
+    auto progress_file = base_path;
+    progress_file.append("progress.dvn");
+
+    chunk_hmap resume_data;
+
     if (!was_created) {
         printf(DIVIEN ": Warning: using existing temporary directory '%s'\n",
                base_path.c_str());
+        if (fs::exists(progress_file)) {
+            // TODO maybe just change file extension to .bin
+            printf(DIVIEN ": Found progress.dvn file -- Resuming mode set\n");
+            resume_data = parse_chunks(progress_file.c_str());
+            printf(DIVIEN
+                   ": progress.dvn parsed -- found %zu complete chunks\n",
+                   resume_data.size());
+        }
     } else {
         printf("Using temporary directory: '%s'\n", base_path.c_str());
     }
 
     printf("Writing encoded output to '%s'\n", out_filename);
 
-    EncodeLoopState state(num_workers, chunk_frame_size, n_threads);
+    EncodeLoopState state(progress_file.c_str(), num_workers, chunk_frame_size,
+                          n_threads, resume_data);
 
     auto start = now();
 
+    // so... basically we skip chunk indexes that are not relevant.
+    // we always need to get the chunk index and hold the decoder
+
     // so I think for thread affinity to work we will have to spawn different
     // processes instead of threads. And somehow share memory between them.
+    // TODO use VLA and placement new?
     std::vector<std::thread> thread_vector{};
     thread_vector.reserve(state.num_workers);
 
@@ -423,20 +554,6 @@ chunked_encode_loop(EncoderOpts e_opts, const char* in_filename,
 
     printf("frame= 0\n");
 
-    auto compute_fps = [](uint32_t n_frames, int64_t time_ms) -> double {
-        if (time_ms <= 0) [[unlikely]] {
-            return INFINITY;
-        } else [[likely]] {
-            return static_cast<double>(1000 * n_frames) /
-                   static_cast<double>(time_ms);
-        }
-    };
-
-    // TODO minimize size of these buffers
-    // TODO I wonder if it's more efficient to join these buffers
-    // into one. And use each half.
-    std::array<char, 32> avg_fps_fmt;
-
     while (true) {
         // acquire lock on mutex I guess?
         // TODO: see if we can release this lock earlier.
@@ -444,30 +561,8 @@ chunked_encode_loop(EncoderOpts e_opts, const char* in_filename,
 
         state.cv.wait_for(lk, std::chrono::seconds(1));
 
-        auto n_frames = state.nb_frames_done.load();
-
-        auto local_now = now();
-        auto total_elapsed_ms = dist_ms(start, local_now);
-
-        // So this part of the code can actually run multiple times.
-        // For each thread that signals completion.
-        // Well this does work for avoiding extra waiting unnecessarily.
-        // TODO simplify/optimize this code if possible
-
-        // average fps from start of encoding process
-        // TODO can we convert to faster loop with like boolean flag + function
-        // pointer or something? It probably won't actually end up being faster
-        // due to overhead tho.
-        auto avg_fps = compute_fps(n_frames, total_elapsed_ms);
-        // using 9.5 to align with rounding behavior of printf
-        (void)snprintf(avg_fps_fmt.data(), avg_fps_fmt.size(),
-                       avg_fps < 9.5 ? "%.1f" : "%0.f", avg_fps);
-
-        // print progress
-        // TODO I guess this should detect if we are outputting to a
-        // terminal/pipe and don't print ERASE_LINE_ASCII if not a tty.
-        printf(ERASE_LINE_ANSI "frame= %d  [%s fps]\n", n_frames,
-               avg_fps_fmt.data());
+        print_progress_internal(start, state.nb_frames_done,
+                                state.nb_frames_skipped);
 
         if (state.all_workers_finished()) {
             break;

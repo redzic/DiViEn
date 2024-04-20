@@ -26,6 +26,8 @@ Checks: "*,
         -readability-magic-numbers,
         -bugprone-easily-swappable-parameters,
         -modernize-use-using,
+        -readability-braces-around-statements,
+        -hicpp-braces-around-statements,
         -cppcoreguidelines-pro-type-reinterpret-cast,
 "
 WarningsAsErrors: ''
