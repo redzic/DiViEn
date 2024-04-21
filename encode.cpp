@@ -360,10 +360,10 @@ int worker_thread(std::string_view base_path, std::string_view prefix,
                         break;
                     }
                     frames2 += frames;
+                    state.nb_frames_skipped += frames;
                 }
                 DbgDvAssert(frames2 == (state.resume_data[chunk_idx].high -
                                         state.resume_data[chunk_idx].low + 1));
-                state.nb_frames_skipped += frames2;
 
                 chunk_idx = state.global_chunk_id++;
                 continue;
