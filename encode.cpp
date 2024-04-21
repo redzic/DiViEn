@@ -7,6 +7,7 @@
 #include "resource.h"
 #include "timing.h"
 #include "util.h"
+#include <cstdio>
 #include <cstring>
 #include <libavutil/frame.h>
 
@@ -302,18 +303,23 @@ void encode_frame_range(FrameAccurateWorkItem& data, const char* ofname) {
 // TODO: make output filename configurable
 // the passed folder_name should include a slash
 // folder_name and prefix should be string_view.
-#define chunk_fname(buf_var, folder_name, prefix, chunk_idx)                   \
+
+constexpr size_t U32_MAXLEN_STR = 10;
+
+#define chunk_fname(buf_var, folder_name, prefix, chunk_idx, flow, fhigh)      \
                                                                                \
-    char buf_var[(folder_name).size() + (prefix).size() + 64];                 \
-    (void)snprintf((char*)(buf_var), sizeof(buf_var), SVF SVF "_chunk_%u.mp4", \
-                   SV(folder_name), SV(prefix), chunk_idx);
+    char(buf_var)[(folder_name).size() + (prefix).size() +                     \
+                  3 * U32_MAXLEN_STR + 20];                                    \
+    (void)snprintf((char*)(buf_var), sizeof(buf_var),                          \
+                   SVF SVF "_chunk%u_%u_%u.mp4", SV(folder_name), SV(prefix),  \
+                   chunk_idx, flow, fhigh);
 
 AlwaysInline int encode_chunk(std::string_view base_path,
                               std::string_view prefix, unsigned int chunk_idx,
                               std::span<AVFrame*> framebuf,
                               EncodeLoopState& state, unsigned int n_threads,
                               EncoderOpts e_opts, ChunkData frange) {
-    chunk_fname(buf, base_path, prefix, chunk_idx);
+    chunk_fname(buf, base_path, prefix, chunk_idx, frange.low, frange.high);
     int ret = encode_frames((char*)buf, framebuf, state, n_threads, e_opts);
     dump_chunk(state.resume_m, state.resume_data, state.p_fname, frange);
     return ret;
@@ -428,23 +434,53 @@ int worker_thread(std::string_view base_path, std::string_view prefix,
     }
 }
 
-void raw_concat_files(std::string_view base_path, std::string_view prefix,
-                      const char* out_filename, unsigned int num_files,
-                      bool delete_after) {
-    std::ofstream dst(out_filename, std::ios::binary);
+// TODO use this function in that other place too
+// F(uint low, uint high)
+// TODO use concepts to enforce contraints somehow?
+template <typename F>
+inline void iter_fixed_splits(F use_chunk, uint32_t num_frames,
+                              uint32_t split_size) {
+    uint32_t chunk_idx = 0;
+    // optimized version (not sure if this works)
+    // uint32_t i = 0;
+    // for (; i + split_size - 1 < num_frames; i += split_size) {
+    //     use_chunk(chunk_idx++, i, i + split_size - 1);
+    // }
+    // if (i + split_size != num_frames)
+    //     use_chunk(chunk_idx++, i, num_frames - 1);
 
-    for (unsigned int i = 0; i < num_files; i++) {
-        chunk_fname(buf, base_path, prefix, i);
-        std::ifstream src((char*)buf, std::ios::binary);
-        dst << src.rdbuf();
-        src.close();
-        // delete file after done
-        if (delete_after) {
-            DvAssert(std::remove(buf) == 0);
-        }
+    for (uint32_t i = 0; i < num_frames; i += split_size) {
+        use_chunk(chunk_idx++, i, std::min(i + split_size - 1, num_frames - 1));
     }
+}
 
-    dst.close();
+void raw_concat_files(std::string_view base_path, std::string_view prefix,
+                      const char* out_filename, uint32_t num_frames,
+                      uint32_t chunk_size, bool delete_after) {
+    make_file(dst, out_filename, "wb");
+
+    iter_fixed_splits(
+        [&](uint32_t idx, uint32_t low, uint32_t high) {
+            chunk_fname(buf_src, base_path, prefix, idx, low, high);
+
+            FILE* src = fopen(buf_src, "rb");
+            DvAssert(src);
+
+            std::array<uint8_t, 4096> readbuf;
+
+            size_t nread = 0;
+            while ((nread = fread(readbuf.data(), 1, readbuf.size(), src)) >
+                   0) {
+                DvAssert(fwrite(readbuf.data(), 1, nread, dst.get()) == nread);
+            }
+
+            DvAssert(fclose(src) == 0);
+            // delete file after done
+            if (delete_after) {
+                DvAssert(std::remove(buf_src) == 0);
+            }
+        },
+        num_frames, chunk_size);
 }
 
 static double compute_fps(uint32_t n_frames, int64_t time_ms) {
@@ -582,10 +618,10 @@ chunked_encode_loop(EncoderOpts e_opts, const char* in_filename,
 
     // there is no active lock on the mutex since all threads
     // terminated, so global_chunk_id can be safely accessed.
-    // raw_concat_files(out_filename, global_chunk_id, true);
     // TODO why does deleting files fail sometimes?
     // TODO error handling
-    raw_concat_files(base_path, prefix, out_filename, state.global_chunk_id,
-                     false);
+    raw_concat_files(base_path, prefix, out_filename, state.get_total_frames(),
+                     chunk_frame_size, false);
+
     return 0;
 }

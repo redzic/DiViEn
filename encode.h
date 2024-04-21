@@ -66,6 +66,10 @@ struct EncodeLoopState {
         return this->nb_threads_done == this->num_workers;
     }
 
+    [[nodiscard]] AlwaysInline uint32_t get_total_frames() const noexcept {
+        return this->nb_frames_done + this->nb_frames_skipped;
+    }
+
     DELETE_DEFAULT_CTORS(EncodeLoopState)
 
     EncodeLoopState(const char* filename, unsigned int num_workers_,
