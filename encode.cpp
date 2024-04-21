@@ -14,8 +14,6 @@
 namespace fs = std::filesystem;
 
 #include <filesystem>
-#include <fstream>
-#include <iostream>
 #include <mutex>
 
 #define ERASE_LINE_ANSI "\x1B[1A\x1B[2K"
@@ -143,13 +141,13 @@ int encode_frame(AVCodecContext* enc_ctx, AVFrame* frame, AVPacket* pkt,
     return 0;
 }
 
-int encode_frames(const char* file_name, std::span<AVFrame*> framebuf,
+int encode_frames(const char* file_name, std::span<AVFrame> framebuf,
                   EncodeLoopState& state, unsigned int n_threads,
                   EncoderOpts e_opts) {
     DvAssert(!framebuf.empty());
 
     EncoderContext encoder;
-    encoder.initialize_codec(framebuf[0], n_threads, e_opts);
+    encoder.initialize_codec(&framebuf[0], n_threads, e_opts);
 
     // C-style IO is needed for binary size to not explode on Windows with
     // static linking
@@ -158,11 +156,11 @@ int encode_frames(const char* file_name, std::span<AVFrame*> framebuf,
     make_file(file, file_name, "wb");
 
     int64_t pts = 0;
-    for (auto* frame : framebuf) {
+    for (auto& frame : framebuf) {
         // required
-        frame->pict_type = AV_PICTURE_TYPE_NONE;
-        frame->pts = pts++;
-        encode_frame(encoder.avcc, frame, encoder.pkt, file.get(),
+        frame.pict_type = AV_PICTURE_TYPE_NONE;
+        frame.pts = pts++;
+        encode_frame(encoder.avcc, &frame, encoder.pkt, file.get(),
                      state.nb_frames_done);
     }
     // need to send flush packet after we're done
@@ -170,24 +168,6 @@ int encode_frames(const char* file_name, std::span<AVFrame*> framebuf,
                  state.nb_frames_done);
 
     return 0;
-}
-
-static void get_frame_defaults(AVFrame* frame) {
-    memset(frame, 0, sizeof(*frame));
-
-    frame->pts = frame->pkt_dts = AV_NOPTS_VALUE;
-    frame->best_effort_timestamp = AV_NOPTS_VALUE;
-    frame->duration = 0;
-    frame->time_base = (AVRational){0, 1};
-    frame->sample_aspect_ratio = (AVRational){0, 1};
-    frame->format = -1; /* unknown */
-    frame->extended_data = frame->data;
-    frame->color_primaries = AVCOL_PRI_UNSPECIFIED;
-    frame->color_trc = AVCOL_TRC_UNSPECIFIED;
-    frame->colorspace = AVCOL_SPC_UNSPECIFIED;
-    frame->color_range = AVCOL_RANGE_UNSPECIFIED;
-    frame->chroma_location = AVCHROMA_LOC_UNSPECIFIED;
-    frame->flags = 0;
 }
 
 // Somewhere here we leak memory
@@ -207,7 +187,7 @@ void encode_frame_range(FrameAccurateWorkItem& data, const char* ofname) {
     printf("frame= 0\n");
 
     AVFrame frame;
-    get_frame_defaults(&frame);
+    avframe_init(&frame);
 
     int64_t fixed_pts = 0;
 
@@ -316,7 +296,7 @@ constexpr size_t U32_MAXLEN_STR = 10;
 
 AlwaysInline int encode_chunk(std::string_view base_path,
                               std::string_view prefix, unsigned int chunk_idx,
-                              std::span<AVFrame*> framebuf,
+                              std::span<AVFrame> framebuf,
                               EncodeLoopState& state, unsigned int n_threads,
                               EncoderOpts e_opts, ChunkData frange) {
     chunk_fname(buf, base_path, prefix, chunk_idx, frange.low, frange.high);
@@ -368,6 +348,8 @@ int worker_thread(std::string_view base_path, std::string_view prefix,
                     frames2 += frames;
                     state.nb_frames_skipped += frames;
                 }
+                // if this assert fails, that means the block size was changed
+                // between runs while resuming
                 DbgDvAssert(frames2 == (state.resume_data[chunk_idx].high -
                                         state.resume_data[chunk_idx].low + 1));
 
@@ -454,6 +436,8 @@ inline void iter_fixed_splits(F use_chunk, uint32_t num_frames,
     }
 }
 
+// TODO is it possible for a tool to detect unclosed file handles as well/
+// other resources?
 void raw_concat_files(std::string_view base_path, std::string_view prefix,
                       const char* out_filename, uint32_t num_frames,
                       uint32_t chunk_size, bool delete_after) {

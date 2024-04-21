@@ -71,13 +71,32 @@ struct DecoderCreationError {
     }
 };
 
+// copied from ffmpeg
+inline void avframe_init(AVFrame* frame) {
+    memset(frame, 0, sizeof(*frame));
+
+    frame->pts = frame->pkt_dts = AV_NOPTS_VALUE;
+    frame->best_effort_timestamp = AV_NOPTS_VALUE;
+    frame->duration = 0;
+    frame->time_base = (AVRational){0, 1};
+    frame->sample_aspect_ratio = (AVRational){0, 1};
+    frame->format = -1; /* unknown */
+    frame->extended_data = frame->data;
+    frame->color_primaries = AVCOL_PRI_UNSPECIFIED;
+    frame->color_trc = AVCOL_TRC_UNSPECIFIED;
+    frame->colorspace = AVCOL_SPC_UNSPECIFIED;
+    frame->color_range = AVCOL_RANGE_UNSPECIFIED;
+    frame->chroma_location = AVCHROMA_LOC_UNSPECIFIED;
+    frame->flags = 0;
+}
+
 // Returns index of video stream, or -1 if it was not found.
 // TODO replace this with av_find_best_stream() or whatever it's
 // called.
 
 // maybe add ctrl+C interrupt that just stops and flushes all packets so far?
 
-using FrameBuf = std::vector<AVFrame*>;
+using FrameBuf = std::vector<AVFrame>;
 
 // yeah so even if you override the destructor, the other destructors
 // still run afterward which is good.
@@ -123,8 +142,8 @@ struct DecodeContext {
         // Since we deleted all the copy/move constructors,
         // we can do this without handling a "moved from" case.
 
-        for (auto* f : framebuf) {
-            av_frame_free(&f);
+        for (auto& f : framebuf) {
+            av_frame_unref(&f);
         }
 
         av_packet_free(&pkt);
@@ -141,9 +160,12 @@ struct DecodeContext {
                            unsigned int framebuf_size)
         : demuxer(demuxer_), pkt(pkt_), decoder(decoder_), video_index(vindex) {
         // TODO: don't use vector for this.
+        framebuf.reserve(framebuf_size);
         for (size_t i = 0; i < framebuf_size; i++) {
-            framebuf.push_back(av_frame_alloc());
+            framebuf.emplace_back();
         }
+        for (auto& frame : framebuf)
+            avframe_init(&frame);
     }
 
     // Open file and initialize video decoder.

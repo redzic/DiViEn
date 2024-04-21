@@ -83,8 +83,6 @@ DecodeContext::open(const char* url, unsigned int framebuf_size) {
                                      .averror = ret}};
     }
 
-    // auto frame1 = make_resource<AVFrame, av_frame_alloc, av_frame_free>();
-
     // TODO properly clean up resources on alloc failure
 
     return std::variant<DecodeContext, DecoderCreationError>{
@@ -125,7 +123,7 @@ int run_decoder(DecodeContext& dc, size_t framebuf_offset, size_t max_frames) {
         while (output_index < max_frames) {
             // here it's equal to the index of the current
             int ret = avcodec_receive_frame(
-                dc.decoder, dc.framebuf[framebuf_offset + output_index]);
+                dc.decoder, &dc.framebuf[framebuf_offset + output_index]);
             if (ret < 0) [[unlikely]] {
                 return ret;
             }

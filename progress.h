@@ -6,7 +6,6 @@
 #include <cstdio>
 #include <mutex>
 #include <unordered_map>
-#include <vector>
 
 #include "util.h"
 
@@ -20,6 +19,9 @@ struct ChunkData {
     uint32_t low = 0;
     uint32_t high = 0;
 };
+
+// TODO store block size, total frame count,
+// etc. And report error if parameters mismatch.
 
 // DiViEn progress file format
 
