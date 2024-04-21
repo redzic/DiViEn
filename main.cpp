@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cerrno>
 #include <charconv>
 #include <cmath>
@@ -582,21 +583,31 @@ int main(int argc, const char* argv[]) {
     }
 
             // default values
-            unsigned int num_workers = 4;
-            unsigned int threads_per_worker = 4;
+            unsigned int num_workers = 0;
+            unsigned int threads_per_worker = 0;
             unsigned int chunk_size = 250;
 
             // Does assigning string literal to variable give that
             // proper (static) lifetime? Need to know for macro purpose.
             // Ideally we assign to string_view though.
             PARSE_OPTIONAL_ARG(num_workers, num_workers_s, "-w");
-            VALIDATE_ARG_NONZERO(num_workers, "-w");
             // perhaps just rename this option -threads?
             PARSE_OPTIONAL_ARG(threads_per_worker, threads_per_worker_s,
                                "-threads");
-            VALIDATE_ARG_NONZERO(threads_per_worker, "-threads");
             PARSE_OPTIONAL_ARG(chunk_size, framebuf_size_s, "-bsize");
             VALIDATE_ARG_NONZERO(chunk_size, "-bsize");
+
+            // auto detect numbers
+            // TODO update this to get physical number of cores to handle SMT
+            // case
+            if (!num_workers) {
+                num_workers =
+                    std::max(1U, std::thread::hardware_concurrency() / 2);
+            }
+
+            if (!threads_per_worker) {
+                threads_per_worker = 4;
+            }
 
             // Now we need to validate the input we received.
             // TODO: move everything for CLI parsing into its own function.
